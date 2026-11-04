@@ -1,0 +1,749 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>vanilla-node — inventory</title>
+<style>
+  :root{
+    --slot:38px;          /* one inventory cell */
+    --gap:2px;
+    --gui:#c6c6c6;        /* vanilla GUI fill */
+    --gui-dark:#555;
+    --gui-light:#fff;
+    --bevel-hi:#ffffff;
+    --bevel-lo:#555555;
+    --panel:#313131;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0;background:#1a1c20;color:#e6e9ee;
+    font:13.5px/1.45 "Segoe UI",system-ui,-apple-system,sans-serif;
+    user-select:none;-webkit-font-smoothing:antialiased;
+    display:flex;flex-direction:column;align-items:center;padding:18px 14px 90px;
+  }
+
+  /* ---------- top status ---------- */
+  .bar{display:flex;flex-wrap:wrap;gap:7px;justify-content:center;margin-bottom:14px;max-width:760px}
+  .chip{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:999px;
+        background:#262a31;border:1px solid #343a43;font-size:12px;color:#c8cfd8;white-space:nowrap}
+  .chip .dot{width:7px;height:7px;border-radius:50%;background:#7a828d}
+  .chip.on{border-color:#2f6b3d;background:#1d2f22;color:#b9e6c4}
+  .chip.on .dot{background:#4ade80;box-shadow:0 0 7px #4ade80}
+  .chip.off{border-color:#6b3a3a;background:#2c1e1e;color:#f0b9b9}
+  .chip.off .dot{background:#f87171}
+  .chip b{color:#eef2f7;font-weight:600}
+
+  /* ---------- vanilla GUI ---------- */
+  .gui{
+    background:var(--gui);padding:6px;
+    border:2px solid;border-color:var(--bevel-hi) var(--bevel-lo) var(--bevel-lo) var(--bevel-hi);
+    box-shadow:0 14px 40px #000a, 0 1px 0 #fff3 inset;
+    border-radius:2px;
+  }
+  .gui-title{color:#3f3f3f;font-weight:600;font-size:13px;padding:2px 3px 5px;letter-spacing:.2px}
+  .gui-sub{color:#3f3f3f;font-size:12px;padding:7px 2px 4px}
+  .rows{display:flex;flex-direction:column;gap:var(--gap)}
+  .row{display:flex;gap:var(--gap)}
+  .row.hotbar{margin-top:6px}
+  .spacer{width:var(--slot)}
+  .arrow{width:34px;align-self:center;text-align:center;color:#3f3f3f;font-size:16px;line-height:1}
+
+  /* ---------- slot ---------- */
+  .slot{
+    width:var(--slot);height:var(--slot);position:relative;flex:none;
+    background:#8b8b8b;
+    border:2px solid;border-color:#373737 #ffffff #ffffff #373737;
+    cursor:pointer;overflow:hidden;
+    transition:background .09s linear;
+  }
+  .slot:hover{background:#c9cfd6}
+  .slot.hot{background:#dbe6ff;border-color:#5a6b86 #dbe6ff #dbe6ff #5a6b86}
+  .slot.drag{background:#f5e6a8}
+  .slot.out{background:#b06a6a}
+  .slot img{
+    position:absolute;left:50%;top:50%;width:30px;height:30px;
+    transform:translate(-50%,-50%);image-rendering:pixelated;pointer-events:none;
+  }
+  .slot .ct{
+    position:absolute;right:2px;bottom:-1px;font:700 12px/1 "Segoe UI",sans-serif;
+    color:#fff;text-shadow:2px 2px 0 #3f3f3f;pointer-events:none;
+  }
+  .slot .dur{
+    position:absolute;left:3px;right:3px;bottom:3px;height:3px;background:#000;pointer-events:none;display:none;
+  }
+  .slot .dur i{display:block;height:100%;background:#0f0}
+  .slot .ph{  /* fallback when a texture is missing */
+    position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+    font:700 13px/1 "Segoe UI",sans-serif;color:#fff;text-shadow:1px 1px 0 #00000088;pointer-events:none;
+  }
+  .slot.empty-hint::after{content:""}
+  .slot.result{background:#8b8b8b}
+  .slot.result::after{content:"";position:absolute;inset:0;box-shadow:inset 0 0 0 2px #6b7f5a55;pointer-events:none}
+
+  /* ---------- tooltip ---------- */
+  #tip{
+    position:fixed;z-index:50;pointer-events:none;display:none;max-width:330px;
+    padding:6px 9px 7px;border:2px solid #2b0a52;border-radius:3px;
+    background:#100010f2;box-shadow:0 0 0 1px #100010 inset,0 8px 22px #000b;
+  }
+  #tip .tt{font-size:13.5px;line-height:1.32;word-break:break-word}
+  #tip .t1{color:#fff}
+  #tip .t2{color:#a8a8a8;font-size:12px}
+  #tip .t3{color:#8f8f8f;font-size:11px;margin-top:4px;border-top:1px solid #ffffff22;padding-top:4px;letter-spacing:.2px}
+  #tip .ench{color:#a8a8ff}
+  #tip .lore{color:#a0a0a0;font-style:italic}
+
+  /* ---------- chat ---------- */
+  #chatBtn{
+    position:fixed;right:18px;bottom:18px;z-index:40;display:flex;align-items:center;gap:8px;
+    padding:9px 15px;border-radius:999px;border:1px solid #3b4350;background:#22262d;color:#e8ecf2;
+    font:600 13px "Segoe UI",sans-serif;cursor:pointer;box-shadow:0 6px 20px #0008;
+  }
+  #chatBtn:hover{border-color:#5b6b86;background:#2a3038}
+  #chatBtn .badge{background:#3b82f6;color:#fff;border-radius:999px;padding:0 6px;font-size:11px;display:none}
+  #chatPanel{
+    position:fixed;right:18px;bottom:74px;z-index:41;width:min(420px,calc(100vw - 28px));
+    height:min(430px,60vh);display:none;flex-direction:column;overflow:hidden;
+    background:#14171c;border:1px solid #333a45;border-radius:10px;box-shadow:0 18px 50px #000b;
+  }
+  #chatPanel.show{display:flex}
+  #chatHead{display:flex;align-items:center;gap:8px;padding:9px 12px;border-bottom:1px solid #262c35;
+            font-size:12.5px;color:#9aa4b2;background:#171b21}
+  #chatHead b{color:#e6ebf2;font-size:13px}
+  #chatHead .x{margin-left:auto;cursor:pointer;color:#8b94a1;font-size:16px;line-height:1;padding:2px 4px}
+  #chatHead .x:hover{color:#fff}
+  #chatLog{flex:1;overflow-y:auto;padding:8px 11px;font-size:12.5px;line-height:1.5;word-break:break-word}
+  #chatLog .ln{padding:1px 0}
+  .slot .cust{position:absolute;left:3px;bottom:3px;width:5px;height:5px;border-radius:50%;background:#f0b429;box-shadow:0 0 4px #f0b42999}
+  #chatLog .me{color:#7fb3ff}
+  #chatLog .sys{color:#c9b26a}
+  #chatLog .note{color:#6f7885;font-size:11.5px;text-align:center;padding:6px 0}
+  #chatForm{display:flex;gap:7px;padding:9px;border-top:1px solid #262c35;background:#171b21}
+  #chatIn{
+    flex:1;background:#0e1116;border:1px solid #2f3742;border-radius:7px;color:#e8ecf2;
+    padding:8px 10px;font:13px "Segoe UI",sans-serif;outline:none;
+  }
+  #chatIn:focus{border-color:#3b82f6}
+  #chatForm button{padding:8px 14px;border-radius:7px;border:1px solid #2f5bd0;background:#2563eb;color:#fff;
+                   font:600 13px "Segoe UI",sans-serif;cursor:pointer}
+  #chatForm button:hover{background:#1d4ed8}
+  .hint{color:#7c8593;font-size:11.5px;margin-top:14px;max-width:640px;text-align:center;line-height:1.7}
+  kbd{background:#262a31;border:1px solid #3a414b;border-radius:3px;padding:0 5px;font-size:11px;color:#cdd5df}
+  .mc{white-space:pre-wrap}
+</style>
+</head>
+<body>
+
+<div class="bar" id="bar"></div>
+
+<div class="gui" id="gui">
+  <div id="box" style="min-width:120px;min-height:60px;display:flex;align-items:center;justify-content:center;color:#3f3f3f">loading…</div>
+</div>
+
+<div class="hint">
+  <b>LMB</b> pick up / put down &middot; <b>RMB</b> half / one &middot; double-click gathers &middot;
+  the stack stays on the cursor until you click again &middot; click outside the slots to throw it &middot; <kbd>shift</kbd>+click quick-move &middot;
+  <kbd>1</kbd>–<kbd>9</kbd> swap with hotbar &middot; <kbd>F</kbd> offhand &middot; <kbd>Q</kbd> drop one &middot; <kbd>shift</kbd>+<kbd>Q</kbd> drop stack
+  <div style="margin-top:9px">
+    <button id="closeBtn" style="display:none;padding:6px 13px;border-radius:6px;border:1px solid #3a414b;background:#262a31;color:#dfe5ee;cursor:pointer">close container</button>
+    <button id="useBtn" style="padding:6px 13px;border-radius:6px;border:1px solid #3a414b;background:#262a31;color:#dfe5ee;cursor:pointer">use held item</button>
+  </div>
+</div>
+
+<div id="tip"></div>
+<div id="carry" style="position:fixed;pointer-events:none;z-index:60;display:none"></div>
+<div id="notice" style="position:fixed;left:50%;transform:translateX(-50%);bottom:78px;z-index:70;display:none;
+  padding:7px 14px;border-radius:8px;background:#2a1d1d;border:1px solid #6b3a3a;color:#f0b9b9;font:12.5px 'Segoe UI',sans-serif"></div>
+
+<button id="chatBtn">💬 Chat <span class="badge" id="chatBadge">0</span></button>
+<div id="chatPanel">
+  <div id="chatHead"><b>Chat</b><span id="chatState">—</span><span class="x" id="chatClose">✕</span></div>
+  <div id="chatLog"><div class="ln note">messages from the server appear here</div></div>
+  <form id="chatForm"><input id="chatIn" placeholder="message or /command" maxlength="256" autocomplete="off"><button>Send</button></form>
+</div>
+
+<script>
+(function () {
+  'use strict'
+  var ST = null, VIEW = null, inflight = false
+  var carry = { id: 0, count: 0, name: '', tex: '', disp: '', max: 64 }
+  // PRED is the local prediction of the click we just sent: the server answers ~1 tick
+  // later, so without it the cursor would visibly lag and the item would snap back.
+  var PRED = null, lastClick = { slot: -2, t: 0, button: -1 }
+  var hovered = -1, DEMO = false
+
+  function $(id) { return document.getElementById(id) }
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c] }) }
+
+  /* ---------- minecraft § colour codes -> html ---------- */
+  var CODES = { '0': '#000000', '1': '#0000aa', '2': '#00aa00', '3': '#00aaaa', '4': '#aa0000', '5': '#aa00aa', '6': '#ffaa00', '7': '#aaaaaa', '8': '#555555', '9': '#5555ff', 'a': '#55ff55', 'b': '#55ffff', 'c': '#ff5555', 'd': '#ff55ff', 'e': '#ffff55', 'f': '#ffffff' }
+  function mcText (raw) {
+    var s = String(raw == null ? '' : raw)
+    if (s.indexOf('\u00a7') < 0) return esc(s)
+    var out = '', open = 0, style = ''
+    for (var i = 0; i < s.length; i++) {
+      var c = s[i]
+      if (c === '\u00a7' && i + 1 < s.length) {
+        var k = s[++i].toLowerCase()
+        if (out && open) { out += '</span>'; open-- }
+        if (k === 'r') { style = ''; continue }
+        // §#RRGGBB — exact colours (servers like CWR send per-character gradients)
+        if (k === '#' && /^[0-9a-fA-F]{6}$/.test(s.substr(i + 1, 6))) {
+          style = 'color:#' + s.substr(i + 1, 6) + ';'; i += 6; continue
+        }
+        if (k === 'l') { style += 'font-weight:700;'; if (out) { out += '<span style="' + style + '">'; open++ } continue }
+        if (k === 'o') { style += 'font-style:italic;'; if (out) { out += '<span style="' + style + '">'; open++ } continue }
+        if (k === 'n') { style += 'text-decoration:underline;'; if (out) { out += '<span style="' + style + '">'; open++ } continue }
+        if (k === 'm') { style += 'text-decoration:line-through;'; if (out) { out += '<span style="' + style + '">'; open++ } continue }
+        if (k === 'k') continue
+        var col = CODES[k]
+        if (col) style = 'color:' + col + ';'
+        continue
+      }
+      if (!open) { out += '<span style="' + style + '">'; open++ }
+      out += esc(c)
+    }
+    while (open-- > 0) out += '</span>'
+    return out
+  }
+
+  /* ---------- item presentation ---------- */
+  function dispOf (it) { return it.disp || it.key || ('item ' + it.id) }
+  function pairKey (it) { return it ? (it.id + '|' + (it.name || '')) : '' }
+  function texSrc (tex) { return (window.__TEX__ && window.__TEX__[tex]) ? window.__TEX__[tex] : ('/tex/' + tex) }
+  /* Icons: the bot ships the real 1.20.4 textures, but a server can hand out an item
+     this build has no art for. Then fall back to the public asset mirrors (the user's
+     browser fetches them, so the bot itself never needs internet). */
+  var MIRROR = 'https://cdn.jsdelivr.net/gh/InventivetalentDev/minecraft-assets@1.20.4/assets/minecraft/textures/'
+  var MIRROR2 = 'https://raw.githubusercontent.com/InventivetalentDev/minecraft-assets/1.20.4/assets/minecraft/textures/'
+  function texCandidates (it) {
+    var out = []
+    if (!it) return out
+    if (it.customIcon) out.push(texSrc(it.customIcon))   // name says what it is meant to be
+    if (it.tex) out.push(texSrc(it.tex))
+    if (it.key) {
+      var k = String(it.key)
+      out.push(MIRROR + 'item/' + k + '.png', MIRROR + 'block/' + k + '.png')
+      out.push(MIRROR2 + 'item/' + k + '.png', MIRROR2 + 'block/' + k + '.png')
+    }
+    return out
+  }
+  function initials (it) {
+    var d = dispOf(it).replace(/[^A-Za-z0-9 ]/g, ' ').trim()
+    var parts = d.split(/\s+/)
+    var s = (parts[0] || '?')[0] || '?'
+    if (parts.length > 1) s += (parts[1][0] || '')
+    return s.toUpperCase()
+  }
+  function hue (it) { var h = 0, s = String(it.id); for (var i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) % 360; return h }
+
+  function makeSlot (idx, it) {
+    var d = document.createElement('div')
+    d.className = 'slot'
+    d.setAttribute('data-slot', String(idx))
+    if (idx < 0) d.classList.add('result')
+    if (it) {
+      var cands = texCandidates(it)
+      if (cands.length) {
+        var img = document.createElement('img')
+        var n = 0
+        img.alt = ''; img.loading = 'lazy'
+        img.onerror = function () {
+          n++
+          if (n < cands.length) { img.src = cands[n]; return }
+          img.remove()
+          var ph = document.createElement('div')
+          ph.className = 'ph'
+          ph.title = (it.disp || '') + '  #' + it.id + (it.key ? '  ' + it.key : '')
+          ph.textContent = initials(it)
+          ph.style.background = 'linear-gradient(145deg,hsl(' + hue(it) + ',45%,42%),hsl(' + hue(it) + ',45%,26%))'
+          d.appendChild(ph)
+        }
+        img.src = cands[0]
+        d.appendChild(img)
+      } else if (it.customIcon) {
+        var imgc = document.createElement('img')
+        imgc.alt = ''; imgc.src = texSrc(it.customIcon)
+        d.appendChild(imgc)
+      } else {
+        var ph2 = document.createElement('div')
+        ph2.className = 'ph'
+        ph2.textContent = initials(it)
+        ph2.style.background = 'linear-gradient(145deg,hsl(' + hue(it) + ',45%,42%),hsl(' + hue(it) + ',45%,26%))'
+        d.appendChild(ph2)
+      }
+      if (it.customIcon) {
+        var k = document.createElement('div'); k.className = 'cust'; k.textContent = ''; d.appendChild(k)
+      }
+      if (it.count > 1) {
+        var c = document.createElement('div'); c.className = 'ct'; c.textContent = it.count; d.appendChild(c)
+      }
+    }
+    d.addEventListener('mouseenter', function () { hovered = idx })
+    d.addEventListener('mouseleave', function () { if (hovered === idx) { hovered = -1; hideTip() } })
+    d.addEventListener('mousemove', function (e) { showTip(e, idx, it) })
+    d.addEventListener('mousedown', function (e) {
+      e.preventDefault(); e.stopPropagation()
+      hovered = idx
+      press(idx, e.button === 2 ? 1 : (e.button === 0 ? 0 : 9), e.shiftKey)
+    })
+    d.addEventListener('mouseup', function (e) { e.preventDefault(); e.stopPropagation() })
+    d.addEventListener('contextmenu', function (e) { e.preventDefault() })
+    return d
+  }
+
+  /* ---------- tooltip ---------- */
+  function showTip (e, idx, it) {
+    var t = $('tip')
+    if (!it) { hideTip(); return }
+    var h = '<div class="tt">'
+    h += '<div class="t1">' + (it.name ? mcText(it.name) : mcText(dispOf(it))) + '</div>'
+    if (it.ench && it.ench.length) for (var i = 0; i < it.ench.length; i++) h += '<div class="ench">' + esc(it.ench[i]) + '</div>'
+    if (it.lore && it.lore.length) for (var j = 0; j < it.lore.length; j++) h += '<div class="lore">' + mcText(it.lore[j]) + '</div>'
+    var sub = []
+    if (it.count > 1) sub.push('×' + it.count)
+    sub.push(it.key || ('#' + it.id))
+    h += '<div class="t3">' + esc(sub.join('  ·  ')) + (idx >= 0 ? '  ·  slot ' + idx : '') + '</div>'
+    // be explicit when the icon is guessed from the name instead of the wire material
+    if (it.customIcon) h += '<div class="t3" style="color:#c9a227">custom item &mdash; icon by name, base ' + esc(it.key || ('#' + it.id)) + '</div>'
+    h += '</div>'
+    t.innerHTML = h
+    t.style.display = 'block'
+    var w = t.offsetWidth, hh = t.offsetHeight
+    var x = e.clientX + 16, y = e.clientY + 14
+    if (x + w > window.innerWidth - 8) x = e.clientX - w - 12
+    if (y + hh > window.innerHeight - 8) y = Math.max(8, e.clientY - hh - 12)
+    t.style.left = x + 'px'; t.style.top = y + 'px'
+  }
+  function hideTip () { $('tip').style.display = 'none' }
+
+  /* ---------- wire ---------- */
+  function serverSlots () { if (!ST) return []; return ST.gui ? ST.gui.slots : ST.inv }
+  function curSlots () { if (!VIEW) return []; return VIEW.gui ? VIEW.gui.slots : VIEW.inv }
+  function cursorNow () { return (VIEW && VIEW.cursor && VIEW.cursor.count > 0) ? VIEW.cursor : null }
+  function itemAt (i) { var s = curSlots(); return (i >= 0 && i < s.length) ? s[i] : null }
+  function winId () { return (ST && ST.gui) ? ST.gui.id : 0 }
+  function isEmptySlot (i) { return !itemAt(i) }
+
+  /* Clicks are serialised, never dropped: a fast click sequence (pick up, put down) has to
+     reach the bot in order. This used to be an `inflight` guard that simply discarded any
+     click made while another was on the wire. */
+  var clickQueue = [], clickBusy = false
+  function flushClicks () {
+    if (clickBusy || !clickQueue.length) return
+    var list = clickQueue.shift()
+    clickBusy = true
+    var body = list.length === 1
+      ? { windowId: winId(), slot: list[0].slot, button: list[0].button, mode: list[0].mode }
+      : { windowId: winId(), clicks: list }
+    var url = list.length === 1 ? '/api/click' : '/api/click_batch'
+    fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+      .then(function (r) { return r.json() })
+      .then(function (j) { if (j && j.error) console.warn('click:', j.error) })
+      .catch(function (e) { console.warn(e) })
+      .then(function () { clickBusy = false; setTimeout(refresh, 60); flushClicks() })
+  }
+  function send (list) {
+    if (DEMO) return Promise.resolve(null)
+    if (clickQueue.length > 32) clickQueue.length = 0        // runaway protection
+    clickQueue.push(list)
+    flushClicks()
+    return Promise.resolve(null)
+  }
+  function click (slot, button, mode) { return send([{ slot: slot, button: button, mode: mode }]) }
+
+  /* ---- click handling, same rules as AbstractContainerScreen ----
+
+     A single press does the whole action, exactly like the game:
+       empty cursor + item      -> the stack is picked up and stays on the cursor
+       cursor + empty slot      -> the stack is placed
+       cursor + same item       -> merged up to the stack limit
+       cursor + other item      -> swapped
+       right button             -> half out of a slot, or one item in
+       shift                    -> quick move between inventory and container
+       double click             -> gather matching items onto the cursor
+       click outside the window -> throw the carried stack
+     The result is predicted locally so the cursor responds on the same frame; the server
+     state replaces the prediction as soon as it agrees. ---- */
+  function stackKey (it) { return it ? (it.id + '|' + (it.name || it.disp || '') + '|' + ((it.ench || []).join(','))) : '' }
+  function maxOf (it) { return (it && it.max) ? it.max : 64 }
+  function sameCount (a, b) {
+    if (!a && !b) return true
+    if (!a || !b) return false
+    return stackKey(a) === stackKey(b) && (a.count | 0) === (b.count | 0)
+  }
+  function slotsMatch (a, b) {
+    if (!a || !b || a.length !== b.length) return false
+    for (var i = 0; i < a.length; i++) if (!sameCount(a[i], b[i])) return false
+    return true
+  }
+
+  function predict (slot, button, mode) {
+    var base = PRED ? PRED : { slots: (serverSlots() || []).slice(), cursor: (ST && ST.cursor) || null }
+    var slots = base.slots.slice()
+    var cur = (base.cursor && base.cursor.count > 0) ? base.cursor : null
+    var stamp = Date.now()
+    var right = button === 1
+
+    if (mode === 4) {                                  // throw: outside the window, or Q
+      if (slot === -999) { cur = null }
+      else {
+        var s4 = slots[slot]
+        if (!s4) return null
+        var n = right ? s4.count : 1
+        slots[slot] = s4.count - n > 0 ? Object.assign({}, s4, { count: s4.count - n }) : null
+      }
+      return { slots: slots, cursor: cur, t: stamp, win: winId() }
+    }
+    if (mode !== 0) return null
+    if (slot === -999) return { slots: slots, cursor: null, t: stamp, win: winId() }
+
+    var it = slots[slot] || null
+    if (!cur) {
+      if (!it) return null
+      if (!right) { cur = it; slots[slot] = null }
+      else {
+        var half = Math.ceil(it.count / 2)
+        cur = Object.assign({}, it, { count: half })
+        slots[slot] = (it.count - half) > 0 ? Object.assign({}, it, { count: it.count - half }) : null
+      }
+      return { slots: slots, cursor: cur, t: stamp, win: winId() }
+    }
+    if (!it) {
+      if (!right) { slots[slot] = cur; cur = null }
+      else {
+        slots[slot] = Object.assign({}, cur, { count: 1 })
+        cur = cur.count > 1 ? Object.assign({}, cur, { count: cur.count - 1 }) : null
+      }
+      return { slots: slots, cursor: cur, t: stamp, win: winId() }
+    }
+    if (stackKey(cur) === stackKey(it)) {
+      var room = maxOf(it) - it.count
+      if (room <= 0) return null
+      var move = right ? 1 : Math.min(cur.count, room)
+      slots[slot] = Object.assign({}, it, { count: it.count + move })
+      cur = (cur.count - move) > 0 ? Object.assign({}, cur, { count: cur.count - move }) : null
+      return { slots: slots, cursor: cur, t: stamp, win: winId() }
+    }
+    if (right) return null                             // different item, right click: nothing
+    slots[slot] = cur; cur = it
+    return { slots: slots, cursor: cur, t: stamp, win: winId() }
+  }
+
+  function press (slot, button, shift) {
+    if (!ST || !ST.connected || DEMO) return
+    if (button !== 0 && button !== 1) return
+    var now = Date.now()
+    var held = !!cursorNow()
+    var curKey = stackKey(cursorNow())
+    var tgt = itemAt(slot)
+    // Vanilla's PICKUP_ALL: a second click on the same slot, quickly, when the first click
+    // was made holding a stack and that slot holds the same item. Judged against what the
+    // cursor held on the *first* click, because the first click may have emptied it.
+    var dbl = slot >= 0 && !!tgt && lastClick.held && lastClick.curKey && stackKey(tgt) === lastClick.curKey &&
+      (now - lastClick.t) < 300 && lastClick.slot === slot && lastClick.button === button
+    lastClick = { slot: slot, t: now, button: button, held: held, curKey: curKey }
+
+    if (shift && slot >= 0) { click(slot, button, 1); PRED = null; render(ST); return }   // quick move
+    if (dbl) { click(slot, button, 6); return }                                          // gather
+    var mode = slot === -999 ? 4 : 0
+    var p = predict(slot, button, mode)
+    if (p) { PRED = p; render(ST) }                    // paint before the round trip
+    click(slot, button, mode)
+  }
+
+  /* ---------- layout ---------- */
+  function range (S, a, b) { var o = []; for (var i = a; i < b; i++) o.push({ i: i, it: (S && S[i]) || null }); return o }
+  function rowEl (items, cls) {
+    var r = document.createElement('div')
+    r.className = 'row' + (cls ? ' ' + cls : '')
+    for (var i = 0; i < items.length; i++) r.appendChild(makeSlot(items[i].i, items[i].it))
+    return r
+  }
+
+  function inventoryPanel (st) {
+    var I = st.inv || []
+    var wrap = document.createElement('div')
+    wrap.style.display = 'flex'; wrap.style.gap = '14px'; wrap.style.alignItems = 'flex-start'
+
+    // left: armour column (helmet, chest, legs, boots)
+    var arm = document.createElement('div')
+    arm.style.display = 'flex'; arm.style.flexDirection = 'column'; arm.style.gap = 'var(--gap)'
+    for (var a = 5; a <= 8; a++) arm.appendChild(makeSlot(a, I[a] || null))
+
+    // right: crafting 2x2 + arrow + result, offhand beneath the result
+    var craft = document.createElement('div')
+    craft.style.display = 'flex'; craft.style.flexDirection = 'column'; craft.style.gap = 'var(--gap)'
+
+    var top = document.createElement('div')
+    top.style.display = 'flex'; top.style.gap = 'var(--gap)'; top.style.alignItems = 'center'
+    var g2 = document.createElement('div')
+    g2.style.display = 'grid'; g2.style.gridTemplateColumns = 'repeat(2,var(--slot))'; g2.style.gap = 'var(--gap)'
+    ;[1, 2, 3, 4].forEach(function (s) { g2.appendChild(makeSlot(s, I[s] || null)) })
+    var arrow = document.createElement('div'); arrow.className = 'arrow'; arrow.textContent = '→'
+    var res = makeSlot(0, I[0] || null)
+    top.appendChild(g2); top.appendChild(arrow); top.appendChild(res)
+
+    var bottom = document.createElement('div')
+    bottom.style.display = 'flex'; bottom.style.gap = 'var(--gap)'; bottom.style.alignItems = 'center'
+    bottom.innerHTML = '<div style="width:' + 0 + 'px"></div>'
+    var offLbl = document.createElement('div')
+    offLbl.style.cssText = 'width:calc(var(--slot)*2 + var(--gap) + 34px + var(--gap));color:#3f3f3f;font-size:11px;text-align:right;padding-right:6px'
+    offLbl.textContent = 'offhand'
+    bottom.appendChild(offLbl)
+    bottom.appendChild(makeSlot(45, I[45] || null))
+
+    craft.appendChild(top); craft.appendChild(bottom)
+    wrap.appendChild(arm); wrap.appendChild(craft)
+
+    var outer = document.createElement('div')
+    outer.appendChild(wrap)
+    var inv = document.createElement('div')
+    inv.className = 'rows'; inv.style.marginTop = '10px'
+    for (var r = 9; r < 36; r += 9) inv.appendChild(rowEl(range(I, r, r + 9)))
+    inv.appendChild(rowEl(range(I, 36, 45), 'hotbar'))
+    outer.appendChild(inv)
+    return outer
+  }
+
+  function containerPanel (st) {
+    var g = st.gui, S = g.slots || [], lay = g.lay || {}
+    var c = (lay.container == null ? Math.max(0, S.length - 36) : lay.container)
+    var outer = document.createElement('div')
+    var t = document.createElement('div')
+    t.className = 'gui-title'
+    t.innerHTML = mcText(g.title || g.menu || 'container')
+    outer.appendChild(t)
+
+    var body = document.createElement('div'); body.className = 'rows'
+    if (g.type === 12) {                    // crafting table: result then 3x3
+      body.appendChild(rowEl(range(S, 0, 1), 'resultRow'))
+      for (var i = 1; i < 10; i += 3) body.appendChild(rowEl(range(S, i, i + 3)))
+    } else if (c > 0 && c <= 9 && c % 9 !== 0) {
+      body.appendChild(rowEl(range(S, 0, c)))
+    } else {
+      for (var k = 0; k < c; k += 9) body.appendChild(rowEl(range(S, k, Math.min(k + 9, c))))
+    }
+    outer.appendChild(body)
+
+    var lbl = document.createElement('div'); lbl.className = 'gui-sub'; lbl.textContent = 'Inventory'
+    outer.appendChild(lbl)
+    var inv = document.createElement('div'); inv.className = 'rows'
+    for (var r = c; r < c + 27; r += 9) inv.appendChild(rowEl(range(S, r, Math.min(r + 9, S.length))))
+    inv.appendChild(rowEl(range(S, c + 27, Math.min(c + 36, S.length)), 'hotbar'))
+    outer.appendChild(inv)
+    return outer
+  }
+
+  var BUILD_INFO = null
+  try {
+    fetch('/api/build').then(function (r) { return r.json() }).then(function (b) { BUILD_INFO = b }).catch(function () {})
+  } catch (e) {}
+
+  function chips (st) {
+    var h = ''
+    h += '<span class="chip ' + (st.connected ? 'on' : 'off') + '"><i class="dot"></i>' + (st.connected ? 'connected' : 'offline') + '</span>'
+    if (st.name) h += '<span class="chip"><b>' + esc(st.name) + '</b>' + (st.server ? ' <span style="color:#7c8593">' + esc(st.server) + '</span>' : '') + '</span>'
+    if (st.player) h += '<span class="chip">xyz <b>' + st.player.x + ' ' + st.player.y + ' ' + st.player.z + '</b></span>'
+    h += '<span class="chip">anti-afk <b>' + (st.antiAfk ? 'on' : 'off') + '</b></span>'
+    if (st.stand) h += '<span class="chip on"><i class="dot"></i>AFK pad</span>'
+    if (st.gui) h += '<span class="chip">window <b>' + st.gui.id + '</b> ' + esc(st.gui.menu || '') + '</span>'
+    if (carry.count) h += '<span class="chip on"><i class="dot"></i>holding ' + esc(carry.disp || carry.name) + (carry.count > 1 ? ' ×' + carry.count : '') + '</span>'
+    if (BUILD_INFO) h += '<span class="chip">build <b>' + esc(BUILD_INFO.build) + '</b> · ' + BUILD_INFO.itemIds + ' ids · ' + BUILD_INFO.localTextures + ' tex</span>'
+    $('bar').innerHTML = h
+  }
+
+  function render (st) {
+    ST = st
+    // Drop a prediction once the server agrees with it, once it is stale, or if the
+    // window changed under it (closing a container must not leave a ghost cursor).
+    if (PRED) {
+      var srvSlots = (st.gui ? st.gui.slots : st.inv) || []
+      var stale = (Date.now() - PRED.t) > 1500
+      var winChanged = (PRED.win | 0) !== ((st.gui ? st.gui.id : 0) | 0)
+      if (stale || winChanged || (slotsMatch(srvSlots, PRED.slots) && sameCount(st.cursor, PRED.cursor))) {
+        // the server never agreed with the move: the window (or a plugin) refused it
+        if (stale && !winChanged && !(slotsMatch(srvSlots, PRED.slots) && sameCount(st.cursor, PRED.cursor))) notice()
+        PRED = null
+      }
+    }
+    if (PRED) {
+      st = Object.assign({}, st)
+      if (st.gui) st.gui = Object.assign({}, st.gui, { slots: PRED.slots })
+      else st.inv = PRED.slots
+      st.cursor = PRED.cursor
+    }
+    VIEW = st
+    var cur = st.cursor
+    carry = {
+      id: cur ? cur.id : 0,
+      count: cur ? cur.count : 0,
+      name: cur ? (cur.name || '') : '',
+      disp: cur ? (cur.disp || '') : '',
+      tex: cur ? (cur.tex || '') : '',
+      max: cur ? (cur.max || 64) : 64
+    }
+    chips(st)
+
+    var box = $('box')
+    box.innerHTML = ''
+    box.style.cssText = 'display:block;min-width:0;min-height:0'
+    var wrap = document.createElement('div')
+    wrap.style.background = 'var(--gui)'
+
+    if (st.gui) {
+      wrap.appendChild(containerPanel(st))
+      $('closeBtn').style.display = ''
+    } else {
+      wrap.appendChild(inventoryPanel(st))
+      $('closeBtn').style.display = 'none'
+    }
+    box.appendChild(wrap)
+
+    // hotbar highlight for the held slot
+    if (st.player && !st.gui) {
+      var held = document.querySelector('[data-slot="' + (36 + (st.player.held | 0)) + '"]')
+      if (held) held.style.outline = '2px solid #fff'
+    }
+    paintCarry()
+  }
+
+  var noticeTimer = null
+  function notice (msg) {
+    var n = $('notice')
+    n.textContent = msg || 'the server refused that move'
+    n.style.display = 'block'
+    if (noticeTimer) clearTimeout(noticeTimer)
+    noticeTimer = setTimeout(function () { n.style.display = 'none' }, 2200)
+  }
+
+  function paintCarry () {
+    var c = $('carry')
+    if (!carry.count || DEMO) { c.style.display = 'none'; return }
+    c.style.display = 'block'
+    // no box and no label: the game hangs the item itself off the cursor
+    var icon = carry.tex
+      ? '<img src="' + esc(texSrc(carry.tex)) + '" style="width:32px;height:32px;image-rendering:pixelated;filter:drop-shadow(0 2px 2px #0008)">'
+      : '<div style="width:32px;height:32px;border-radius:4px;background:#333c;color:#fff;font:600 11px sans-serif;display:flex;align-items:center;justify-content:center">' + esc(String((carry.disp || carry.name || '?').slice(0, 2)).toUpperCase()) + '</div>'
+    c.innerHTML = '<div style="position:relative;width:32px;height:32px">' + icon +
+      (carry.count > 1 ? '<span style="position:absolute;right:-2px;bottom:-2px;font:700 12px monospace;color:#fff;text-shadow:2px 2px 0 hsl(0,0%,10%)">' + carry.count + '</span>' : '') +
+      '</div>'
+  }
+
+  /* ---------- events ---------- */
+  document.addEventListener('mousemove', function (e) {
+    var c = $('carry')
+    if (carry.count) { c.style.left = (e.clientX - 16) + 'px'; c.style.top = (e.clientY - 16) + 'px' }
+  })
+  $('gui').addEventListener('mousedown', function (e) {
+    if (e.target.closest('.slot')) return
+    e.preventDefault(); press(-999, e.button === 2 ? 1 : 0, e.shiftKey)
+  })
+  $('gui').addEventListener('mouseup', function (e) { if (!e.target.closest('.slot')) e.preventDefault() })
+  $('gui').addEventListener('contextmenu', function (e) { e.preventDefault() })
+  document.addEventListener('keydown', function (e) {
+    if (document.activeElement === $('chatIn')) return
+    if (!ST || !ST.connected || hovered < 0) return
+    var k = e.key
+    if (k === 'q' || k === 'Q') { e.preventDefault(); click(hovered, e.shiftKey ? 1 : 0, 4); return }
+    if (k === 'f' || k === 'F') { e.preventDefault(); if (!carry.count) click(hovered, 40, 2); return }
+    if (/^[1-9]$/.test(k)) { e.preventDefault(); if (!carry.count) click(hovered, parseInt(k, 10) - 1, 2) }
+  })
+  $('useBtn').onclick = function () {
+    fetch('/api/use', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+      .then(function (r) { return r.json() })
+      .then(function (j) { if (j && !j.ok) notice(j.error || 'cannot use the held item'); setTimeout(refresh, 80) })
+      .catch(function () { notice('not connected') })
+  }
+  $('closeBtn').onclick = function () {
+    fetch('/api/close', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }).then(refresh).catch(function () {})
+  }
+
+  /* ---------- chat ---------- */
+  var chatOpen = false, chatSeq = 0, unread = 0, chatSeen = {}
+  function chatLine (kind, text, seq) {
+    var log = $('chatLog')
+    // never paint the same server line twice, even if a poll window overlaps
+    if (seq !== undefined && seq !== null) {
+      if (chatSeen[seq]) return
+      chatSeen[seq] = 1
+    }
+    var note = log.querySelector('.note')
+    if (note) log.removeChild(note)
+    var d = document.createElement('div')
+    d.className = 'ln ' + (kind === 'me' ? 'me' : (kind === 'server' ? 'sys' : ''))
+    d.innerHTML = mcText(text)
+    log.appendChild(d)
+    while (log.children.length > 500) log.removeChild(log.firstChild)
+    var atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 60
+    if (atBottom) log.scrollTop = log.scrollHeight
+    if (!chatOpen && kind !== 'me') { unread++; var b = $('chatBadge'); b.style.display = 'inline-block'; b.textContent = unread > 99 ? '99+' : unread }
+  }
+  function pollChat () {
+    fetch('/api/chat?since=' + chatSeq).then(function (r) { return r.json() }).then(function (j) {
+      if (!j || !j.lines) return
+      chatSeq = j.last || chatSeq
+      $('chatState').textContent = j.lines.length ? '' : ''
+      for (var i = 0; i < j.lines.length; i++) chatLine(j.lines[i].kind, j.lines[i].text, j.lines[i].seq)
+    }).catch(function () {})
+  }
+  $('chatBtn').onclick = function () {
+    chatOpen = !chatOpen
+    $('chatPanel').classList.toggle('show', chatOpen)
+    if (chatOpen) { unread = 0; $('chatBadge').style.display = 'none'; $('chatIn').focus() }
+  }
+  $('chatClose').onclick = function () { chatOpen = false; $('chatPanel').classList.remove('show') }
+  $('chatForm').onsubmit = function (e) {
+    e.preventDefault()
+    var v = $('chatIn').value.trim()
+    if (!v) return
+    $('chatIn').value = ''
+    if (DEMO) { chatLine('me', v); return }
+    fetch('/api/chat', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: v }) })
+      .then(function (r) { return r.json() })
+      .then(function (j) { if (!j.ok) chatLine('server', '⚠ ' + (j.error || 'not sent')) })
+      .catch(function () { chatLine('server', '⚠ not connected') })
+  }
+
+  /* ---------- demo (no bot reachable: still shows the layout) ---------- */
+  function demoState () {
+    var mk = function (id, disp, key, tex, count, extra) {
+      var o = { id: id, count: count || 1, name: null, disp: disp, custom: false, key: key, tex: tex, lore: [], ench: [] }
+      if (extra) for (var k in extra) o[k] = extra[k]
+      return o
+    }
+    var inv = new Array(46).fill(null)
+    inv[0] = mk(3, 'Emerald', 'emerald', 'item/emerald.png')
+    inv[5] = mk(2, 'Iron Helmet', 'iron_helmet', 'item/iron_helmet.png')
+    inv[9] = mk(1, 'Diamond', 'diamond', 'item/diamond.png', 2)
+    inv[10] = mk(757, 'Totem of Undying', 'totem_of_undying', 'item/totem_of_undying.png')
+    inv[36] = mk(1, 'Diamond', 'diamond', 'item/diamond.png', 2)
+    inv[37] = mk(757, 'Totem of Undying', 'totem_of_undying', 'item/totem_of_undying.png')
+    inv[38] = mk(80, 'Ancient Debris', 'ancient_debris', 'block/ancient_debris_side.png', 64)
+    inv[39] = mk(41, 'Netherite Scrap', 'netherite_scrap', 'item/netherite_scrap.png', 41)
+    inv[40] = mk(838, 'Wind Charge', 'wind_charge', 'item/wind_charge.png')
+    inv[41] = mk(727, 'Dark Oak Chest Boat', 'dark_oak_chest_boat', 'item/dark_oak_chest_boat.png')
+    inv[45] = mk(1156, 'Shield', 'shield', 'item/shield.png')
+    return { connected: false, demo: true, name: 'demo', server: 'preview', player: { x: 0, y: 65, z: 0, held: 0 }, antiAfk: true, inv: inv, gui: null, cursor: null }
+  }
+
+  function refresh () {
+    fetch('/api/state').then(function (r) { return r.json() }).then(function (st) {
+      DEMO = false
+      if (st && st.demo) { DEMO = true }
+      render(st)
+    }).catch(function () {
+      DEMO = true
+      render(demoState())
+    })
+  }
+  refresh()
+  setInterval(refresh, 1000)
+  pollChat()
+  setInterval(pollChat, 1500)
+})()
+</script>
+</body>
+</html>

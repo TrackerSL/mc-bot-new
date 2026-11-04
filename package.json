@@ -1,0 +1,24 @@
+{
+  "name": "vanilla-node",
+  "version": "1.0.0",
+  "private": true,
+  "description": "The vanilla game as ONE Node.js process - full Minecraft 1.20.4 protocol client, no java, no window",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test_protocol.js && node test_clicks.js && node test_wire_click.js && node test_ui.js && node test_inv.js && node test_items.js && node test_icons.js && node test_cursor.js && node test_crash.js && node test_auth.js",
+    "preview": "node build_preview.js && node build_preview_live.js && node build_preview_kit.js"
+  },
+  "engines": {
+    "node": ">=16"
+  },
+  "devDependencies": {
+    "jsdom": "^29.1.1"
+  },
+  "keywords": [
+    "minecraft",
+    "protocol",
+    "bot",
+    "1.20.4"
+  ]
+}
