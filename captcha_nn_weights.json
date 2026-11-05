@@ -1,0 +1,107 @@
+{
+ "file": "captcha_nn_weights.bin",
+ "alphabet": "abcdefghijklmnopqrstuvwxyz0123456789",
+ "classes": 37,
+ "slots": 4,
+ "input": 64,
+ "tensors": {
+  "c1w": {
+   "shape": [
+    16,
+    1,
+    5,
+    5
+   ],
+   "offset": 0,
+   "count": 400
+  },
+  "c1b": {
+   "shape": [
+    16
+   ],
+   "offset": 400,
+   "count": 16
+  },
+  "c2w": {
+   "shape": [
+    32,
+    16,
+    5,
+    5
+   ],
+   "offset": 416,
+   "count": 12800
+  },
+  "c2b": {
+   "shape": [
+    32
+   ],
+   "offset": 13216,
+   "count": 32
+  },
+  "c3w": {
+   "shape": [
+    64,
+    32,
+    3,
+    3
+   ],
+   "offset": 13248,
+   "count": 18432
+  },
+  "c3b": {
+   "shape": [
+    64
+   ],
+   "offset": 31680,
+   "count": 64
+  },
+  "c4w": {
+   "shape": [
+    64,
+    64,
+    3,
+    3
+   ],
+   "offset": 31744,
+   "count": 36864
+  },
+  "c4b": {
+   "shape": [
+    64
+   ],
+   "offset": 68608,
+   "count": 64
+  },
+  "fc1w": {
+   "shape": [
+    160,
+    1024
+   ],
+   "offset": 68672,
+   "count": 163840
+  },
+  "fc1b": {
+   "shape": [
+    160
+   ],
+   "offset": 232512,
+   "count": 160
+  },
+  "fc2w": {
+   "shape": [
+    148,
+    160
+   ],
+   "offset": 232672,
+   "count": 23680
+  },
+  "fc2b": {
+   "shape": [
+    148
+   ],
+   "offset": 256352,
+   "count": 148
+  }
+ }
+}

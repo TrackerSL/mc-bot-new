@@ -6,7 +6,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node test_protocol.js && node test_clicks.js && node test_wire_click.js && node test_ui.js && node test_inv.js && node test_items.js && node test_icons.js && node test_cursor.js && node test_crash.js && node test_auth.js",
+    "test": "node test_auth.js && node test_captcha.js && node test_captcha_hardening.js && node test_captcha_nn.js && node test_clicks.js && node test_crash.js && node test_cursor.js && node test_icons.js && node test_inv.js && node test_items.js && node test_map_captcha.js && node test_protocol.js && node test_ui.js && node test_wire_click.js && node test_captcha_saved_policy.js",
     "preview": "node build_preview.js && node build_preview_live.js && node build_preview_kit.js"
   },
   "engines": {

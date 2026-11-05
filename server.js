@@ -15,7 +15,7 @@ const REMINDERS = !!process.env.SONAR_REMINDERS
 // a 27-block sweep per teleport) in normal play — opt in with SONAR_VERBOSE=1
 const VERBOSE = !!process.env.SONAR_VERBOSE // 20-tick position reminders (capture shows the real client stays silent while idle)
 const DEBUG_CHAT = process.env.DEBUG_CHAT === '1'
-const BUILD = '2026-11-04j'
+const BUILD = '2026-11-05an'
 const DEBUG_ITEM = process.env.DEBUG_ITEM === '1'
 const DEBUG_SLOT = process.env.DEBUG_SLOT === '1'
 const ICON_GUESS = process.env.ICON_GUESS === '1'   // off: the 1.20.4 registry is authoritative  // bump when the web UI or item tables change
@@ -37,6 +37,8 @@ const ECHO_MS = Number(process.env.SONAR_ECHO_MS || 45)
 const crypto = require('crypto')
 const fs = require('fs')   // hoisted: the data tables below are read at module load
 const path = require('path')
+let mapCaptcha = null
+try { mapCaptcha = require('./map_captcha.js') } catch (e) { mapCaptcha = null }
 
 /* block collision categories per state-id range: 0 = passable, 1 = full cube,
    2 = half-height (slabs) — built from minecraft-data 1.20.4 blocks.json */
@@ -285,6 +287,85 @@ function resolveRef (ref, state, dir, depth = 0) {
 }
 
 /* varint */
+/* ---------- the map captcha ----------
+   CWR's second verification ("Please enter the text in chat that is displayed on the
+   map") draws a code into a 128x128 in-game map. A real player reads it off the screen;
+   a headless client has to turn those colour indices into something a human can read.
+   The colours themselves are not what matters — the glyph shapes are — so the image is
+   binarised against the most common colour and upscaled 4x. */
+const PNG_CRC = (() => {
+  const t = new Int32Array(256)
+  for (let n = 0; n < 256; n++) {
+    let c = n
+    for (let k = 0; k < 8; k++) c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1)
+    t[n] = c
+  }
+  return t
+})()
+function pngChunk (type, body) {
+  const len = Buffer.alloc(4); len.writeUInt32BE(body.length, 0)
+  const typed = Buffer.concat([Buffer.from(type, 'ascii'), body])
+  // the CRC covers the type and body only — including the length makes every chunk
+  // invalid, which is what a strict viewer reports as "cannot process image"
+  let c = -1
+  for (let i = 0; i < typed.length; i++) c = PNG_CRC[(c ^ typed[i]) & 0xff] ^ (c >>> 8)
+  const crc = Buffer.alloc(4); crc.writeUInt32BE((c ^ -1) >>> 0, 0)
+  return Buffer.concat([len, typed, crc])
+}
+function pngFromGrey (cols, rows, grey, rgb, scale) {
+  const sc = scale || 1
+  const w = cols * sc, h = rows * sc
+  const raw = Buffer.alloc((w * 3 + 1) * h)
+  for (let y = 0; y < h; y++) {
+    const off = y * (w * 3 + 1)
+    raw[off] = 0
+    const sy = Math.floor(y / sc)
+    for (let x = 0; x < w; x++) {
+      const si = sy * cols + Math.floor(x / sc)
+      const o = off + 1 + x * 3
+      // rgb=true takes a flat r,g,b,r,g,b... array of cols*rows*3 values
+      if (rgb) { raw[o] = grey[si * 3]; raw[o + 1] = grey[si * 3 + 1]; raw[o + 2] = grey[si * 3 + 2] }
+      else { raw[o] = raw[o + 1] = raw[o + 2] = grey[si] }
+    }
+  }
+  const ihdr = Buffer.alloc(13)
+  ihdr.writeUInt32BE(w, 0); ihdr.writeUInt32BE(h, 4)
+  ihdr[8] = 8; ihdr[9] = 2; ihdr[10] = 0; ihdr[11] = 0; ihdr[12] = 0
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    pngChunk('IHDR', ihdr),
+    pngChunk('IDAT', zlib.deflateSync(raw)),
+    pngChunk('IEND', Buffer.alloc(0))
+  ])
+}
+/* clientbound map: id varint, scale u8, locked bool, icons optional-array,
+   width u8, then (if width>0) height u8, x i8, z i8, width*height colour bytes */
+function decodeMapPacket (payload) {
+  const src = { b: payload, off: 0 }
+  const mapId = readUvarint(src)
+  src.off += 1
+  src.off += 1
+  const hasIcons = payload[src.off++] === 1
+  if (hasIcons) {
+    const n = readUvarint(src)
+    for (let i = 0; i < n; i++) {
+      readUvarint(src)
+      src.off += 3
+      const hasName = payload[src.off++] === 1
+      if (hasName) {
+        const len = readUvarint(src)
+        src.off += len
+      }
+    }
+  }
+  const cols = payload[src.off++]
+  if (!cols) return null
+  const rows = payload[src.off++]
+  src.off += 2
+  if (src.off + cols * rows > payload.length) return null
+  return { id: mapId, cols, rows, data: payload.subarray(src.off, src.off + cols * rows) }
+}
+
 function readUvarint (src) {
   let num = 0, shift = 0, bytes = 0
   for (;;) {
@@ -984,6 +1065,7 @@ function runSession () {
     }
 
     /* inbound chat text pipeline */
+    const captchaImagePath = () => path.join(process.cwd(), 'captcha-map.png')
     const onText = (text, speaker, coloured) => {
       try {
         const shown = coloured || text
@@ -993,6 +1075,27 @@ function runSession () {
       const line = speaker ? `${speaker}: ${text}` : text
       const mention = cfg.playerName && text.toLowerCase().startsWith('@' + cfg.playerName.toLowerCase())
       chatLog(mention ? `★ MENTION ${line}` : `chat: ${line}`)
+      if (/wrong answer|wrong captcha|incorrect! try again/i.test(text) && !speaker) {
+        captchaMisses++;
+        pendingCaptcha = null;
+        // Only explicitly configured same-picture servers may spend another candidate.
+        // Most inspected plugins replace the answer after a rejection.
+        const samePicture = /^(on|true|yes|1)$/i.test(ENV.CAPTCHA_RETRY_SAME_MAP || '');
+        const auto = !/^(off|false|no|0)$/i.test(ENV.CAPTCHA_AUTO || '');
+        const next = captchaCandidates.find(t => !captchaTried.includes(t));
+        const picture = lastMap ? Buffer.from(lastMap.data).toString('base64') : null;
+        if (samePicture && auto && picture && next && captchaTried.length < 3 && captchaMisses < 2) {
+          const generation = sessionGen;
+          setTimeout(() => {
+            if (generation !== sessionGen || !lastMap ||
+                Buffer.from(lastMap.data).toString('base64') !== picture) {
+              log('verify: map changed — cancelled stale candidate'); return;
+            }
+            if (SESSION_SEND(next)) { captchaTried.push(next); log(`verify: retried with "${next}"`); }
+          }, 1500);
+        } else log('verify: answer rejected — waiting for the current challenge; no blind candidate retry');
+      }
+      if (/verification failed|captcha/i.test(line)) { /* keep the gate log readable */ }
       chatSeen.push(text)
       if (chatSeen.length > 60) chatSeen.shift()
 
@@ -1005,6 +1108,134 @@ function runSession () {
         return
       }
       if (/blocked from entering|wait a few minutes/i.test(text)) { finish('blocked-cooldown'); return }
+      if (/displayed on the map|text .*on the map|enter the text/i.test(text)) {
+        // second gate: "Please enter the text in chat that is displayed on the map"
+        const path = captchaImagePath()
+        const writeCaptcha = () => {
+          if (!lastMap) return false
+          try {
+            const { cols, rows, data } = lastMap
+            const freq = new Map()
+            for (const v of data) freq.set(v, (freq.get(v) || 0) + 1)
+            let bg = 0, best = -1
+            for (const [k, n] of freq) if (n > best) { best = n; bg = k }
+            const grey = new Uint8Array(data.length)
+            for (let i = 0; i < data.length; i++) grey[i] = data[i] === bg ? 255 : 0
+            fs.writeFileSync(path, pngFromGrey(cols, rows, grey, null, 4))
+            // and the same map in real Minecraft colours: the text is legible there,
+            // which the thresholded copy above never is
+            let readText = null, readConf = 0
+            if (mapCaptcha) {
+              try {
+                const rgbTrue = mapCaptcha.trueColourRgb({ cols, rows, data })
+                fs.writeFileSync(path.replace(/\.png$/, '-true.png'), pngFromGrey(cols, rows, rgbTrue, true, 6))
+                const res = mapCaptcha.solve({ cols, rows, data })
+                readText = res.text
+                readConf = res.confident ? 1 : 0
+                const detail = res.chars.map(c => `${c.ch}(${c.d.toFixed(2)}/${c.gap.toFixed(2)})`).join(' ')
+                log(`verify: auto-read "${res.text}" ${res.confident ? '(confident)' : '(unsure)'} — ${detail}`)
+                const decision = require('./captcha_policy').assess(res, ENV)
+                let plausible = decision.allowed
+                if (!plausible) log(`verify: holding auto-answer — ${decision.reason}`)
+                // two misses in a row means the layout is too tangled to read; stop
+                // burning attempts (the server blocks the IP) and hand it to a person
+                if (captchaMisses >= 2) {
+                  log('verify: two guesses were rejected — giving up on auto-answer, the picture above is readable, type the text in the console')
+                  plausible = false
+                }
+                captchaCandidates = res.candidates || [res.text]
+                captchaTried = []
+                if (!/^(off|false|no|0)$/i.test(ENV.CAPTCHA_AUTO || '')) {
+                if (plausible) {
+                  if (SESSION_SEND(res.text)) {
+                    captchaTried.push(res.text)
+                    pendingCaptcha = { text: res.text, bin: path.replace(/\.png$/, '.bin'), at: Date.now(), by: 'bot' }
+                    log(`verify: answered with "${res.text}"${res.confident ? '' : ' (best guess)'}`)
+                  }
+                } else {
+                  log('verify: could not make out the text — open captcha-map-true.png and type it in the console')
+                }
+                } else log('verify: auto-answer is off — type the text in the console (POST /api/chat)')
+              } catch (e) { log(`verify: auto-read failed (${e.message})`) }
+            }
+            // and the untouched data: the map is text drawn over a patterned background,
+            // so thresholding it throws away the only thing that separates them
+            try {
+              fs.writeFileSync(path.replace(/\.png$/, '.bin'), lastMapRaw || Buffer.alloc(0))
+              const rgb = new Uint8Array(data.length * 3)
+              for (let i = 0; i < data.length; i++) {
+                const v = data[i]
+                if (v === bg) { rgb[i * 3] = 255; rgb[i * 3 + 1] = 255; rgb[i * 3 + 2] = 255; continue }
+                // distinct hue per colour index, so text and background stay apart
+                const h = (v * 0.61803398875) % 1
+                const f = (n) => { const k = (n + h * 6) % 6; return Math.round(255 * (0.15 + 0.85 * Math.max(0, Math.min(k, 4 - k, 1)))) }
+                rgb[i * 3] = f(5); rgb[i * 3 + 1] = f(3); rgb[i * 3 + 2] = f(1)
+              }
+              fs.writeFileSync(path.replace(/\.png$/, '-colour.png'), pngFromGrey(cols, rows, rgb, true, 4))
+            } catch (e) { if (cfg.verbose) log(`captcha colour dump: ${e.message}`) }
+            try {
+              let dumped = 0
+              for (const [id, entry] of mapById) {
+                if (Date.now() - entry.at > 20000) continue
+                fs.writeFileSync(path.replace(/\.png$/, '-' + id + '.bin'), entry.raw)
+                const d2 = entry.m.data
+                const rgb2 = new Uint8Array(d2.length * 3)
+                const fq = new Map()
+                for (const v of d2) fq.set(v, (fq.get(v) || 0) + 1)
+                let bg2 = 0, best2 = -1
+                for (const [k, v] of fq) if (v > best2) { best2 = v; bg2 = k }
+                for (let i = 0; i < d2.length; i++) {
+                  const v = d2[i]
+                  if (v === bg2) { rgb2[i * 3] = 255; rgb2[i * 3 + 1] = 255; rgb2[i * 3 + 2] = 255; continue }
+                  const hue = (v * 0.61803398875) % 1
+                  const f2 = (n2) => { const k = (n2 + hue * 6) % 6; return Math.round(255 * (0.15 + 0.85 * Math.max(0, Math.min(k, 4 - k, 1)))) }
+                  rgb2[i * 3] = f2(5); rgb2[i * 3 + 1] = f2(3); rgb2[i * 3 + 2] = f2(1)
+                }
+                fs.writeFileSync(path.replace(/\.png$/, '-' + id + '.png'), pngFromGrey(entry.m.cols, entry.m.rows, rgb2, true, 4))
+                dumped++
+              }
+              if (dumped) log(`verify: wrote ${dumped} recently seen map(s) as captcha-map-<id>.png — one of them is the captcha`)
+            } catch (e) { if (cfg.verbose) log(`captcha dump: ${e.message}`) }
+            log(`verify: the server is showing a text captcha on a map — picture saved to ${path}`)
+            log('verify: read it and type the text in the console (or web chat) — the bot sends it as-is')
+            if (readText === null) captchaMisses++
+            if (cfg.web) log(`verify: or open http://<this-host>:${cfg.webPort}/captcha.png in a browser`)
+            captchaPendingUntil = Date.now() + 120000
+            return true
+          } catch (e) { log(`verify: could not write the captcha picture (${e.message})`); return false }
+        }
+        // A map that was already in memory when the prompt arrived is a stale one (the
+        // player's own map, the lobby map). The captcha map is sent right after the
+        // prompt, so the old one is dropped and we wait for a genuinely new packet.
+        // The map arrives a beat BEFORE this prompt (measured: same second), so a map
+        // seen in the last few seconds IS the captcha — only an older one is stale.
+        if (lastMap && Date.now() - (lastMapAt || 0) < 3000 && writeCaptcha()) return
+        const stale = Date.now() - (lastMapAt || 0) < 3000 ? null : lastMap
+        const staleRaw = stale ? lastMapRaw : null
+        lastMap = null
+        lastMapRaw = null
+        if (writeCaptcha()) return
+        // the map packet often lands a beat after the chat line — wait for it instead
+        // of reporting "nothing to read" and losing the only chance at the text
+        log('verify: the server wants the text on the map — waiting for the map picture...')
+        let tries = 0
+        const retry = setInterval(() => {
+          tries++
+          if (writeCaptcha()) { clearInterval(retry); return }
+          if (tries >= 12) {
+            clearInterval(retry)   // 6s
+            if (stale) {
+              lastMap = stale
+              lastMapRaw = staleRaw
+              log('verify: no new map arrived — falling back to the one already in memory (it may be the wrong map)')
+              writeCaptcha()
+            } else {
+              log('verify: no map packet arrived at all — this gate cannot be answered automatically')
+            }
+          }
+        }, 500)
+        return
+      }
       if (/verified successfully/i.test(text)) { setVerifyDone(); log('verify passed — rejoining'); finish('rejoin'); return }
       if (/verifying your connection/i.test(text)) log('verify gate — waiting...')
 
@@ -1235,6 +1466,15 @@ function runSession () {
     // so a transfer can be compared packet-for-packet between a good and a stuck run
     let traceOn = ENV.TRACE === 'on'
     let playWhileConfig = 0
+    let lastMap = null       // the newest in-game map — the captcha is drawn on one
+    let lastMapRaw = null
+    let captchaMisses = 0
+    let lastMapAt = 0
+    let pendingCaptcha = null
+    let captchaCandidates = []
+    let captchaTried = []
+    const mapById = new Map()
+    let captchaPendingUntil = 0
     const TRACE_NOISE = /^(map_chunk|unload_chunk|entity_move|entity_look|entity_head|rel_entity|entity_teleport|set_entity_motion|update_light|block_change|multi_block|sound|world_event|particle|block_entity_data|time_update|health|experience|set_slot|window_items|position|flying|keep_alive)$/
     if (traceOn) {
       log('trace: on — every packet, both directions (TRACE=on)')
@@ -2139,7 +2379,7 @@ function runSession () {
       'login', 'position', 'system_chat', 'player_chat', 'profileless_chat', 'kick_disconnect',
       'custom_payload', 'multi_block_change', 'animation', 'held_item_slot',
       'entity_velocity', 'tab_complete', 'set_slot', 'window_items',
-      'map_chunk', 'unload_chunk', 'spawn_entity', 'rel_entity_move',
+      'map', 'map_chunk', 'unload_chunk', 'spawn_entity', 'rel_entity_move',
       'entity_move_look', 'entity_look', 'entity_head_rotation',
       'entity_teleport', 'entity_destroy', 'set_passengers',
       'chunk_batch_finished', 'start_configuration', 'animation',
@@ -2297,6 +2537,22 @@ function runSession () {
           player.inWorld = true
           curMode = params.gameMode
           joinEvents.push({ mode: params.gameMode, at: Date.now() })
+          if (pendingCaptcha && Date.now() - pendingCaptcha.at < 60000) {
+            try {
+              const dir = path.join(__dirname, 'captcha-samples')
+              fs.mkdirSync(dir, { recursive: true })
+              const safe = pendingCaptcha.text.replace(/[^A-Za-z0-9]/g, '_').slice(0, 16) || 'blank'
+              let saved = null
+              if (pendingCaptcha.bin && fs.existsSync(pendingCaptcha.bin)) {
+                saved = path.join(dir, `${safe}__${Date.now()}.bin`)
+                fs.copyFileSync(pendingCaptcha.bin, saved)
+              }
+              const meta = path.join(dir, 'labels.jsonl')
+              fs.appendFileSync(meta, JSON.stringify({ text: pendingCaptcha.text, by: pendingCaptcha.by, bin: saved, at: new Date().toISOString() }) + '\n')
+              log(`verify: "${pendingCaptcha.text}" was ACCEPTED — saved as a labelled sample${pendingCaptcha.by === 'human' ? ' (answered by you)' : ''}`)
+            } catch (e) { log(`verify: could not save the labelled sample (${e.message})`) }
+            pendingCaptcha = null
+          }
           log(`joined world (entity ${params.entityId}, mode ${params.gameMode})`)
           // the LocalPlayer tick loop runs for the whole session, exactly like
           // the real game — verify sessions arm it at tp2 (unchanged shape),
@@ -2642,6 +2898,21 @@ function runSession () {
           }
           if (params.carriedItem) inv.cursor = params.carriedItem
           return
+        case 'map': {
+          // the verification captcha is a picture on a map; keep the newest one so it
+          // can be turned into a PNG the moment the server asks for the text
+          try {
+            const m = decodeMapPacket(payload)
+            if (m) {
+              lastMap = m; lastMapRaw = Buffer.from(payload); lastMapAt = Date.now()
+              // several maps can be in flight (the player's own map, the captcha map).
+              // Keep them all by id so the right one can be identified afterwards.
+              mapById.set(String(m.id), { m, raw: Buffer.from(payload), at: Date.now() })
+              while (mapById.size > 8) mapById.delete(mapById.keys().next().value)
+            }
+          } catch (e) { if (cfg.verbose) log(`map decode: ${e.message}`) }
+          return
+        }
         case 'map_chunk':
           // world knowledge — the client parses chunks, it does not ignore them.
           // Decoding is deferred (≤8 ms per turn, then yield): a burst of 200 chunks
@@ -3074,7 +3345,10 @@ function runSession () {
       }
       tick()
     })
-    WEB_CHAT = text => { if (SESSION_SEND(text) === false) throw new Error('not in play right now (re-connecting)') }
+    WEB_CHAT = text => {
+      if (SESSION_SEND(text) === false) throw new Error('not in play right now (re-connecting)')
+      if (captchaPendingUntil > Date.now()) pendingCaptcha = { text: String(text).trim(), bin: null, at: Date.now(), by: 'human' }
+    }
     SESSION_WAIT_PLAY = (timeout) => new Promise(resolve => {
       if (state === 'play') return resolve('ok')
       const t0 = Date.now()
@@ -3818,6 +4092,14 @@ function startWebConsole () {
         sendJson(res, 200, { build: BUILD, itemIds: Object.keys(ITEM_NAMES).length, localTextures: tn })
         return
       }
+      if (req.method === 'GET' && url.pathname === '/captcha.png') {
+        try {
+          const png = fs.readFileSync(path.join(process.cwd(), 'captcha-map.png'))
+          res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'no-store' })
+          res.end(png)
+        } catch { sendJson(res, 404, { ok: false, error: 'no captcha picture yet' }) }
+        return
+      }
       if (req.method === 'GET' && url.pathname === '/api/chat') {
         sendJson(res, 200, webChatSince(url.searchParams.get('since')))
         return
@@ -3952,6 +4234,7 @@ async function main () {
       log(`session error: ${e.message}`)
       reason = 'restart'
     }
+    if (/^(on|true|yes|1)$/i.test(ENV.SINGLE_SESSION || '')) { log(`single-session test finished: ${reason} — not reconnecting`); process.exit(0) }
     streak = reason === 'rejoin' ? 0 : streak + 1
     if (reason === 'banned') {
       const waitMs = Math.max(30000, (banUntil || 0) - Date.now())
@@ -4010,4 +4293,4 @@ if (require.main === module) {
 module.exports = { encodePacket, decodePacket, flattenComponent, offlineUuid, writeUvarint, readUvarint, MAPS, proto, get SESSION_ACTIONS () { return SESSION_ACTIONS },
   // vanilla menu engine (exported for the offline click test suite)
   doClickSim, predictClick, menuLayout, quickMoveOnce, qmMove, maxStackOf, stClone, stEmpty, sameItem, nbtEq,
-  readNbtTagged, writeNbtTagged, ITEM_STACK_MAX }
+  readNbtTagged, writeNbtTagged, ITEM_STACK_MAX, decodeMapPacket, pngFromGrey }

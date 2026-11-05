@@ -321,6 +321,38 @@ Two other things that were fixed at the same time and are worth knowing about:
   `[!] To log in, solve the captcha: /captcha 69ss98uq`; the bot now sends it back. Ignoring it looks
   exactly like a wrong password, and repeated wrong passwords end in a 28-minute blacklist.
 
+## The three verification gates
+
+CWR checks you three different ways before it lets you play, and they are easy to confuse
+because the last two are both "captchas":
+
+1. **The arena (Sonar).** After `login ok — configuration` the server drops you into a proof
+   arena: you fall onto a plane, ride a boat and a minecart, and it watches which packets you
+   echo. The bot reproduces this from collision data — that is what all the `sonar: …` lines are.
+   It logs `sonar: verification complete` when the gate passes.
+2. **A chat captcha.** `[!] To log in, solve the captcha: /captcha 69ss98uq`. The bot answers it
+   immediately (`auth: captcha — answering /captcha …`). Ignoring it looks exactly like a wrong
+   password, and repeated wrong passwords end in a 28-minute blacklist.
+3. **A picture captcha on a map.** `CWR» Please enter the text in chat that is displayed on the
+   map.` The server draws a code onto a 128×128 in-game map; a player reads it off the screen.
+   A headless client cannot guess that text, so the bot does the next best thing: it decodes the
+   map packet, binarises it against its most common colour, upscales it 4× and writes
+   `captcha-map.png`:
+
+   ```
+   [bot] verify: the server is showing a text captcha on a map — picture saved to …/captcha-map.png
+   [bot] verify: read it and type the text in the console (or web chat) — the bot sends it as-is
+   [bot] verify: or open http://<this-host>:8080/captcha.png in a browser
+   ```
+
+   Open the picture, read the code, type it in the console (or the web console's chat box) and the
+   bot sends it as a normal chat line. With `WEB=on` the console also serves it at `/captcha.png`.
+   If no map packet arrives at all the log says so instead of failing silently.
+
+   This gate only shows up for new or freshly flagged accounts — an established one (after the
+   arena has been passed once) goes straight from `Authentication Successful` to playing, which is
+   what your normal sessions look like.
+
 ## Auth: /register vs /login
 
 The server says which one it wants, and the two prompts look nothing alike:
@@ -439,3 +471,97 @@ On a free Render web service also add an uptime pinger (UptimeRobot, cron-job.or
 `https://<service>.onrender.com/healthz` every 5–10 minutes: free instances spin down
 after a stretch without inbound HTTP, and a spinning-down container cannot hold a
 Minecraft session.
+
+## Reader update — 2026-11-05v
+
+- Blank-slot decoding now matches training (remove blank, do not terminate at the first blank), and duplicate spellings combine probability mass.
+- Single forward inference is the default; five-shift averaging is opt-in through `captcha_nn.read(model, rgb, {tta:true})`. Local saved-map timing: ~74 ms versus ~325 ms previously.
+- Neural results now expose actual per-slot probabilities, runner-ups and gaps instead of repeating the whole-code score for every character.
+- Duplicate processing of a fresh map prompt is fixed; rejection counters increment on actual rejection.
+- Blind candidate retries are off unless `CAPTCHA_RETRY_SAME_MAP=on`. Even then, the delayed retry checks the map pixels and session generation. This is conservative, not a general challenge-family detector.
+- `SINGLE_SESSION=on` prevents automatic reconnect after one session.
+- Live CWR test on 2026-11-05: read and submitted `7u4` once; server returned `Your connection was verified successfully. You may now rejoin the server`. Test stopped without reconnecting or logging into the account. One success is not an accuracy estimate.
+- Original saved set remains 2/3 first guesses; `yd7z` is now candidate 2 rather than 3, but first guess remains `yq7z`.
+
+## Fine-tuned reader — 2026-11-05w
+
+Weights were fine-tuned on five fully labelled live captures and partial `n?e` supervision, mixed with replay/distillation. `dbxe` now reads correctly on its training image; the partial image reads `n1e` with `nle` second. Its tentative middle `l` was NOT used as ground truth. Six captures excluded from fine-tuning retain 5/6 first guesses; `yd7z` is still wrong. External validation (used for checkpoint selection) changed from 238/512 to 244/512. These results are not a live-server test of the new weights or proof of general accuracy.
+
+## Lowercase-l update — 2026-11-05x
+
+The user directed using `nle` as the full label for the ambiguous live capture. Further fine-tuning now reads that training image as `nle` (runner-up `n1e`) and retains `dbxe`. Six captures excluded from fine-tuning remain 5/6. External validation used for checkpoint selection rose from 244/512 to 247/512; Java reference fell from 352/512 to 351/512. No new live-server validation was performed. This is a learned weight update, not a hard-coded substitution; the `nle` label is user-supplied, not server-confirmed.
+
+## Saved yd7z correction — 2026-11-05y
+
+Added the saved yd7z capture to fine-tuning. The JavaScript runtime now reads yd7z first (yq7z second), and all 12 saved full-map images match their supplied labels. Seven are fine-tuning images, so 12/12 is a regression result, not independent accuracy evidence. Five captures excluded from this fine-tuning retain 5/5. External validation used for selection: 247/512 → 248/512; Java reference: 351/512 → 356/512. New weights were not tested on fresh live-server challenges. 305 offline assertions passed. Prior x bundle remains available for rollback.
+
+## Training + hardening — 2026-11-05z
+
+Shipped weights blend build y with a replay/distillation fine-tune on r4rb and 2ob. All 16 packaged full-map samples now read correctly (56/56 characters). Nine were fine-tuning examples, so this is not independent/live accuracy. Seven excluded captures remain correct. External comparisons: 248/512 → 248/512 and 265/512 → 263/512; a small regression, not a broad accuracy gain. Prior y ZIP remains available for rollback.
+
+`npm test` includes all 14 offline suites (335 assertions); `node eval_captcha.js` scores all 16 packaged samples. Each sample records label provenance and whether it was used for fine-tuning.
+
+Hardening validates RGB inputs, weight sizes/values, tensor layout and manifest compatibility. Corrupt models produce explicit errors. Auto-submit now requires a valid neural reading, joint score >= `CAPTCHA_MIN_CONFIDENCE` (default 0.5), and all slot gaps >= `CAPTCHA_MIN_GAP` (default 0.15). Set `CAPTCHA_ALLOW_UNCERTAIN=on` only to explicitly allow lower-confidence submissions; default is off/manual confirmation. These are heuristic risk controls, not calibrated accuracy guarantees. No fresh live testing was performed with z.
+
+## All labelled captures — 2026-11-05aa
+
+All 16 complete labelled maps are now included in supervised fine-tuning, including the seven previously excluded ones. Exported JavaScript reread: 16/16 first guesses. All are now training-image regression examples; there is no longer an excluded saved-server set. External validation: 511/1024 → 515/1024; post-selection external audit: unchanged at 485/976. These small changes do not demonstrate broader live accuracy. Build z hardening remains. 335 offline assertions passed. No new live-server tests were made; prior z ZIP remains available for rollback.
+
+## New corrections — 2026-11-05ab
+
+Added user-confirmed a3l and pa8, balancing rehearsal of bk1u to avoid a digit-1/lowercase-l regression. JavaScript reread: 20/20 labelled full maps match. Eighteen were used in fitting; j5m and edop remain excluded and correct. a3l's joint score is only ~0.442, so conservative defaults still require manual confirmation for it. Validation: 515/1024 → 516/1024; repeated external audit: 485/976 → 488/976. Small changes, not proof of fresh-server improvement. 339 offline assertions passed. No new live test; prior aa ZIP remains available for rollback.
+
+## EXPERIMENTAL uppercase O — 2026-11-05ac
+
+Expanded the head to 38 classes: lowercase letters, digits, uppercase O only, plus blank. OOu is preserved exactly as user-labelled; other uppercase letters remain unsupported. After classifier-only fine-tuning, saved-image reread matches all 23 labels (20 fitted; j5m, edop, zkp excluded and retained). 050e and OOu remain low-confidence (~0.319/~0.263) and are held by the default policy. No thresholds were lowered.
+
+This capability has an external regression: validation 516/1024 → 510/1024; audit 488/976 → 481/976; Java reference 357/512 → 346/512. It did not meet the previous stricter regression guard. Treat ac as experimental, NOT a proven general accuracy improvement. 344 offline assertions passed. No new live test. Use prior mc-node-bot-ab.zip to roll back; older weights require their matching runtime.
+
+## Uppercase O REMOVED — 2026-11-05ad (supersedes ac)
+
+User corrected OOu to 00u: two zeros + lowercase u. Restored pre-O 37-class runtime and trained from ab with corrected 00u/050e. Active alphabet is a–z and 0–9 only; lowercase o is retained. Saved reread: 23/23 supplied labels match; 20 fitted, j5m/edop/zkp excluded. 050e and 00u now score ~0.882/~0.888. External validation 515/1024; audit 488/976; Java reference 358/512. 344 offline assertions pass. No live test. Experimental ac is superseded; old checkpoints require their matching runtime.
+
+## 13uo update — 2026-11-05ae
+
+Added user-confirmed 13uo; saved reread matches 25/25 labels (21 fitted, four excluded). 346 offline assertions pass. Reused validation 515/1024 → 525/1024; Java reference 358/512 → 354/512. Live continuation: byo8 and mxof submitted and accepted, then 4lz3 withheld as uncertain and paused for a label. These three new live captures were not trained. Earlier corpus counts are historical; 5r6n-live12 is a distinct capture retained alongside 5r6n.
+
+## 4143 update — 2026-11-05af
+
+Added user-confirmed 4143. Saved reread: 28/28 labels, 99/99 characters (22 fitted, six excluded). 349 offline assertions pass. Reused external validation 525/1024 → 521/1024; Java reference 354/512 → 349/512: known-image fix, not proven broad improvement. Live #17 guessed 3gp7, withheld as uncertain, paused for label. No submitted answer at #17. Earlier counts are historical; prior ae ZIP remains available for rollback.
+
+## 3kp7 update — 2026-11-05ag
+
+Head-only correction with replay/distillation: 29/29 saved labels match (23 fitted, six excluded); 350 offline assertions pass. Reused external validation 521/1024 → 525/1024; Java reference unchanged at 349/512. Live #18 02n accepted; #19 arc withheld as uncertain and paused for label. These two new captures were not fitted. No broad accuracy claim; prior af ZIP remains available.
+
+## aro update — 2026-11-05ah
+
+Head-only aro correction; saved reread 31/31 (24 fitted, seven excluded), 109/109 characters. 352 offline assertions pass. Reused validation 525/1024 → 522/1024; Java reference 349/512 → 347/512. Final live #20 yddn withheld as uncertain, awaiting label. Twenty challenges received across evolving models, not a final-model accuracy trial. Prior ag ZIP remains available.
+
+## Final y1dh update — 2026-11-05ai
+
+Head-only correction of #20, y1dh (digit 1), with frozen visual features and stronger distillation. Saved reread: 32/32 labels, 113/113 characters (25 fitted, seven excluded). 353 offline assertions pass. Reused validation unchanged at 522/1024; Java reference 347/512 → 352/512. Not independent accuracy evidence. All 20 requested challenges received; final ai not freshly live-tested. No more live attempts started. Prior ah ZIP retained for rollback.
+
+## tmkh update — 2026-11-05aj
+
+Known-image correction: 33/33 saved labels match, 117/117 characters (26 fitted, seven excluded). 354 offline assertions pass. Reused validation 522/1024 → 521/1024; Java reference 352/512 → 349/512. Live #22 guessed 7f2y, withheld, paused for label. Testing is now open-ended with user correction pauses, not batch collection. Prior ai ZIP retained.
+
+## 7f2y reinforcement — 2026-11-05ak
+
+34/34 saved labels match, 121/121 characters (27 fitted, seven excluded); 355 offline assertions pass. Reused validation 521/1024 → 518/1024; Java reference unchanged 349/512. Live #23 exactly repeated user-labelled #20 y1dh but remained uncertain/withheld. #24 blocked before CAPTCHA; respecting server cooldown, no runner active. No general accuracy improvement claimed. Prior aj ZIP retained.
+
+
+## Saved-policy fix — 2026-11-05al
+
+All 34 distinct labelled full-map grids (35 capture records including repeated #23/#20) now produce the correct text AND pass default submission gates. Previously correct text hid withheld y1dh/tmkh reads. Policy thresholds unchanged (score 0.5, minimum gap 0.15; uncertainty override off), no answer lookup. Added test_captcha_saved_policy.js to npm test; 423 assertions across 15 suites pass.
+
+Head-only epoch 2, frozen features, strong replay/distillation. 27 distinct maps fitted, seven excluded from gradient updates but inspected during selection. Saved checks are not independent accuracy evidence. Reused validation 518/1024 → 514/1024; Java reference 349/512 → 345/512. No live server trial this round; prior ak ZIP retained.
+
+
+## sjp update — 2026-11-05am
+
+35/35 distinct labelled maps (36 records with duplicate #23/#20) pass correct text AND default submission gates; 426 assertions across 15 suites passed. Policy/default environment unchanged. sjp corrected with third-slot-only classifier update, selected epoch 22; reused external validation 514/1024 → 513/1024, Java reference unchanged 345/512. 28 maps fitted, seven excluded from gradients but inspected in development. Live #27 y91 withheld for insufficient gap, awaiting user label. Prior al ZIP retained.
+
+
+## y9l update — 2026-11-05an
+
+User confirmed lowercase l in #27. Third-slot-only correction: 36/36 distinct saved maps (37 records including #23/#20 duplicate) pass text AND default policy; 429 assertions across 15 suites pass. y9l score ~0.841, minimum gap ~0.683. Gate defaults unchanged. 29 fitted images, seven excluded from gradients but inspected in development. Reused validation unchanged 513/1024; Java reference 345/512 → 346/512. Live #28 blocked before CAPTCHA, no runner active; respect cooldown. No broad accuracy claim. Prior am retained.
