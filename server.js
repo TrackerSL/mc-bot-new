@@ -15,7 +15,7 @@ const REMINDERS = !!process.env.SONAR_REMINDERS
 // a 27-block sweep per teleport) in normal play — opt in with SONAR_VERBOSE=1
 const VERBOSE = !!process.env.SONAR_VERBOSE // 20-tick position reminders (capture shows the real client stays silent while idle)
 const DEBUG_CHAT = process.env.DEBUG_CHAT === '1'
-const BUILD = '2026-11-05an'
+const BUILD = '2026-11-05ao'
 const DEBUG_ITEM = process.env.DEBUG_ITEM === '1'
 const DEBUG_SLOT = process.env.DEBUG_SLOT === '1'
 const ICON_GUESS = process.env.ICON_GUESS === '1'   // off: the 1.20.4 registry is authoritative  // bump when the web UI or item tables change
@@ -929,6 +929,14 @@ function runSession () {
     let lastRx = Date.now() // last inbound packet, for the traffic watchdog
     let reconfN = 0     // server-initiated re-configurations seen this session
     sessionGen++
+    const authSessionGen = sessionGen
+    const { AuthFlow } = require('./auth_flow')
+    const authFlow = new AuthFlow({
+      mode: authPlan, password: cfg.password, delayMs: cfg.delayMs, sleep,
+      prompt: authPromptMode, reply: authReplyInfo, log,
+      active: () => authSessionGen === sessionGen && !ended && state === 'play' && !ready,
+      send: cmd => SESSION_SEND(cmd)
+    })
     const startedAt = Date.now()
 
     const socket = new net.Socket()
@@ -1096,6 +1104,7 @@ function runSession () {
         } else log('verify: answer rejected — waiting for the current challenge; no blind candidate retry');
       }
       if (/verification failed|captcha/i.test(line)) { /* keep the gate log readable */ }
+      if (cfg.auth) authFlow.observe(text)
       chatSeen.push(text)
       if (chatSeen.length > 60) chatSeen.shift()
 
@@ -1239,14 +1248,15 @@ function runSession () {
       if (/verified successfully/i.test(text)) { setVerifyDone(); log('verify passed — rejoining'); finish('rejoin'); return }
       if (/verifying your connection/i.test(text)) log('verify gate — waiting...')
 
-      // Captcha gate — CWR inserts this between attempts and before /login:
-      //   [!] To log in, solve the captcha: /captcha 69ss98uq
-      // A bot that ignores it looks exactly like a wrong password, so answer it at once.
+      // The session actor queues text challenges ahead of login/register and
+      // retries rate-limited sends only after the server's stated cooldown.
       const cap = cfg.auth ? text.match(/\/captcha\s+([A-Za-z0-9]{2,16})/i) : null
-      if (cap && Date.now() > (captchaUntil || 0)) {
-        captchaUntil = Date.now() + 4000
-        log(`auth: captcha — answering /captcha ${cap[1]}`)
-        try { SESSION_SEND(`/captcha ${cap[1]}`) } catch {}
+      if (cap) {
+        if (!ready && !authBusy && Date.now() > authCooldownUntil) {
+          authBusy = true
+          doAuth().then(ok => { authBusy = false; if (ok) markReady() })
+            .catch(e => { authBusy = false; log('auth: actor aborted; restart after inspecting server feedback') })
+        }
         return
       }
 
@@ -1261,7 +1271,7 @@ function runSession () {
       // The server repeats its prompt about once a second. Trigger on the first one,
       // and if an attempt is already running, only re-trigger after a cooldown so a
       // silent failure cannot loop forever; a busy-but-stuck attempt is abandoned.
-      const stuck = authBusy && Date.now() - authStartedAt > 45000
+      const stuck = false // never overlap an active authentication actor
       if (cfg.auth && !ready && prompt && !countdown && Date.now() > authCooldownUntil && (!authBusy || stuck)) {
         if (stuck) log('auth: the previous attempt went quiet — starting a fresh one')
         authBusy = true
@@ -1275,7 +1285,7 @@ function runSession () {
         authWarned = true
         log('server asks for login but AUTH=off — skipping (set AUTH=on to auto-login)')
       }
-      if (cfg.auth && /login was successful/i.test(text)) markReady()
+      if (cfg.auth && authFlow.done) markReady()
       if (!cfg.auth && !ready) markReady() // no auth expected: first chat = we're in
     }
 
@@ -1297,73 +1307,18 @@ function runSession () {
     const markReady = () => { if (ready) return; ready = true; maybeReady() }
     const setVerifyDone = () => { if (verifyDone) return; verifyDone = true; maybeReady() }
 
-    const authSucceeded = () => chatSeen.some(t => /login was successful|Your login was successful|Authentication Successful|already logged in|Welcome back .* to /i.test(t))
+    const authSucceeded = () => authFlow.done
 
     const doAuth = async (attempt = 1, mode = authPlan) => {
-      // Auth commands bypass the gated queue — the gate opens only AFTER auth
-      // completes, so pushing through it would deadlock. The sleeps below outlive
-      // sessions, so each send is gated on the session that started the attempt.
-      const gen = sessionGen
-      const mine = () => gen === sessionGen && !ended && state === 'play'
-      const pw = cfg.password
-      const stars = '*'.repeat(Math.max(3, pw.length))
-      // authPlan survives the session: after a reconnect the server asks again,
-      // and by then we already know whether this account needs /register.
       if (mode) authPlan = mode
-      const registerFirst = authPlan === 'register'
-
-      log(`auth: ${registerFirst ? 'registering (/register) — the server asked a new account to register' : 'logging in (/login)'} (AUTH=on, password ${stars})`)
-      await sleep(cfg.delayMs) // delay-before-every-cmd, incl the first
-      if (!mine()) { log('auth: session changed while waiting — the next session picks this up'); return false }
-      // every auth command: note where the chat was, send, then read what came back
-      const ask = async (cmd, waitMs) => {
-        const mark = chatSeen.length
-        if (SESSION_SEND(cmd) === false) return []
-        await sleep(waitMs)
-        const reply = chatSeen.slice(mark).filter(Boolean)
-        if (reply.length) log(`auth: server replied to ${cmd.split(' ')[0]}: ${reply.slice(-3).join(' | ')}`)
-        return reply
-      }
-
-      if (registerFirst) {
-        const reg = await ask(`/register ${pw} ${pw}`, 2500)
-        const info = reg.map(authReplyInfo).filter(Boolean).pop()
-        if (info && info.kind === 'already') { log('auth: the account already exists — switching to /login'); authPlan = 'login' }
-        if (info && info.kind === 'rule') { log('auth: the server rejected the password itself (see "server replied" above) — fix PASSWORD in .env'); authFailWhy = 'password rejected by the server' }
-        if (info && info.kind === 'badpass') { log('auth: wrong password — fix PASSWORD in .env'); authFailWhy = 'wrong password' }
-      }
-      if (!mine()) { log('auth: session changed while waiting — the next session picks this up'); return false }
-      if (authPlan !== 'register') {
-        const log1 = await ask(`/login ${pw}`, 3500)
-        const info = log1.map(authReplyInfo).filter(Boolean).pop()
-        if (info && info.kind === 'already') { /* already logged in: nothing to do */ }
-        if (info && info.kind === 'notreg') { log('auth: the account is not registered — registering'); authPlan = 'register'; return doAuth(attempt, 'register') }
-        if (info && (info.kind === 'badpass' || info.kind === 'rule')) { log('auth: the server rejected the credentials (see "server replied" above)'); authFailWhy = info.kind === 'badpass' ? 'wrong password' : 'password rejected by the server' }
-      }
-      if (authSucceeded()) { authPlan = 'login'; log('auth: logged in'); return true }
-
-      // Wrong guess? Try the other form once before giving up — an account that
-      // is already registered answers /register with "already registered", and a
-      // fresh one answers /login with "not registered".
-      if (authPlan !== 'register' && attempt === 1) {
-        log('auth: no confirmation — trying /register (the account may be new)')
-        return doAuth(attempt, 'register')
-      }
-      if (!mine()) { log('auth: session changed while waiting — the next session picks this up'); return false }
-      if (authFailWhy) {
-        // the server told us the password is wrong — retrying only builds toward a ban
-        log(`auth: giving up on this password (${authFailWhy}) — fix PASSWORD in .env and restart`)
+      if (!authFlow.registered && mode) authFlow.mode = mode
+      const ok = await authFlow.run() // one shared promise: no stale overlapping attempts
+      if (ok) { authPlan = 'login'; log('auth: logged in'); return true }
+      if (!ended && !ready) {
+        authFailWhy = authFlow.failure || 'no confirmation; inspect credentials and server feedback'
         authCooldownUntil = Date.now() + 10 * 60 * 1000
-        return false
+        log('auth: paused for 10 minutes — no automatic login/register loop')
       }
-      if (attempt < 3) {
-        log(`auth: still no confirmation — retrying (attempt ${attempt + 1}/3) in 10s`)
-        await sleep(10000)
-        if (!mine()) { log('auth: session changed while waiting — the next session picks this up'); return false }
-        return doAuth(attempt + 1, authPlan)
-      }
-      log(`auth: FAILED${authFailWhy ? ` — ${authFailWhy}` : ' — check PASSWORD'} (you can also type /login <pass> or /register <pass> <pass> in the terminal)`)
-      if (mine()) { log('auth: reconnecting for a clean session'); finish('restart') }
       return false
     }
 
@@ -3365,6 +3320,7 @@ function runSession () {
       // a session can end between two awaits (socket reset, re-configuration,
       // server transfer) — that is not an error worth crashing over
       if (state !== 'play') { sendBlocked = (sendBlocked || 0) + 1; return false }
+      authFlow.nextAt = Math.max(authFlow.nextAt, Date.now() + authFlow.interval)
       if (t.startsWith('/')) {
         // section 5: real players TAB the command before pressing Enter —
         // captured client sent tab_complete(full text) right before /login

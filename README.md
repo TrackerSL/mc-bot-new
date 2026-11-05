@@ -565,3 +565,9 @@ Head-only epoch 2, frozen features, strong replay/distillation. 27 distinct maps
 ## y9l update — 2026-11-05an
 
 User confirmed lowercase l in #27. Third-slot-only correction: 36/36 distinct saved maps (37 records including #23/#20 duplicate) pass text AND default policy; 429 assertions across 15 suites pass. y9l score ~0.841, minimum gap ~0.683. Gate defaults unchanged. 29 fitted images, seven excluded from gradients but inspected in development. Reused validation unchanged 513/1024; Java reference 345/512 → 346/512. Live #28 blocked before CAPTCHA, no runner active; respect cooldown. No broad accuracy claim. Prior am retained.
+
+## Authentication sequencing fix — 2026-11-05ao
+
+Added auth_flow.js: session-scoped serialized authentication, challenge priority, server cooldown handling, bounded retries, no registration-on-silence, no overlapping attempts and no automatic auth-failure reconnect loop. Explicit credential errors stop retries. Minimum command spacing 1.5s, respects longer CMD_DELAY_MS and server waits; credentials/tokens redacted. Update the full bundle including auth_flow.js.
+
+454 assertions across 16 offline suites pass, including 25 fake-clock authentication transcript checks. Reader/weights/default submission gates unchanged; all 36 distinct saved labelled maps still pass text plus gates. No live credential test or remote deployment performed. If Fly restarts continue, investigate host events/checks separately; the submitted logs do not establish the restart reason. Ensure Fly internal_port matches WEB_PORT (3000 in the reported deployment). Prior an ZIP retained.

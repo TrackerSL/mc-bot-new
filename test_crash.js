@@ -1,6 +1,6 @@
 /* Regression tests for the crash/robustness round:
    - SESSION_SEND must never throw (a session can end between two awaits)
-   - auth must not send into a dead session, must retry, then reconnect
+   - auth must not send into a dead session, must retry within bounds, then pause
    - a server re-configuration must be answered with the full handshake
    - the process must survive an exception instead of exiting
 */
@@ -8,6 +8,7 @@ const fs = require('fs')
 const path = require('path')
 const { spawn } = require('child_process')
 
+const FLOW = fs.readFileSync(path.join(__dirname, 'auth_flow.js'), 'utf8')
 const SRC = fs.readFileSync(path.join(__dirname, 'server.js'), 'utf8')
 let pass = 0, fail = 0
 const T = (name, cond, extra) => {
@@ -28,11 +29,10 @@ T('web chat surfaces "not in play" instead of crashing',
   /if \(SESSION_SEND\(text\) === false\) throw new Error\('not in play right now/.test(SRC))
 
 // --- 2. auth
-T('auth remembers the session it started in', /const gen = sessionGen/.test(SRC) && /const mine = \(\) => gen === sessionGen && !ended && state === 'play'/.test(SRC))
-const gates = (SRC.match(/if \(!mine\(\)\)/g) || []).length
-T('every auth send is gated on that session', gates >= 4, gates)
-T('auth retries before giving up', /if \(attempt < 3\)/.test(SRC) && /retrying \(attempt \$\{attempt \+ 1\}\/3\)/.test(SRC))
-T('a failed auth reconnects instead of sitting there', /auth: reconnecting for a clean session/.test(SRC))
+T('auth remembers its exact session generation', SRC.includes('const authSessionGen = sessionGen') && SRC.includes('authSessionGen === sessionGen && !ended'))
+T('every auth send rechecks active session after waits', FLOW.includes('while(this.alive())') && FLOW.includes('await this.sleep(delay);continue;'))
+T('auth retries are bounded', FLOW.includes('attempt<=3') && FLOW.includes('counts[mode]>=3'))
+T('a failed auth pauses without a speculative reconnect', SRC.includes('no automatic login/register loop') && !SRC.includes('auth: reconnecting for a clean session'))
 T('auth attempts are serialised', /let authBusy = false/.test(SRC) && /let authStartedAt = 0/.test(SRC) && !/authStarted\b(?!At)/.test(SRC))
 
 // --- 3. re-configuration handshake

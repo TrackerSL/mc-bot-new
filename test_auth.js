@@ -7,6 +7,7 @@
 */
 const fs = require('fs')
 const path = require('path')
+const FLOW=fs.readFileSync(path.join(__dirname,'auth_flow.js'),'utf8')
 const SRC = fs.readFileSync(path.join(__dirname, 'server.js'), 'utf8')
 let pass = 0, fail = 0
 const T = (n, c, x) => { if (c) { pass++; console.log('  ok  ' + n) } else { fail++; console.log('  FAIL ' + n + (x !== undefined ? '  ' + JSON.stringify(x) : '')) } }
@@ -51,17 +52,13 @@ const banInfo = new Function(SRC.slice(SRC.indexOf('function banInfo'), SRC.inde
 }
 
 const auth = SRC.slice(SRC.indexOf('const authSucceeded'), SRC.indexOf('/* Sonar verification arena'))
-{
-  const iReg = auth.indexOf('ask(`/register ${pw} ${pw}`')
-  const iLog = auth.indexOf('ask(`/login ${pw}`')
-  T('register is sent before login when the account is new', iReg >= 0 && iLog > iReg, { iReg, iLog })
-}
-T('the register step only runs when the prompt said register', /const registerFirst = authPlan === 'register'/.test(auth) && /if \(registerFirst\) \{/.test(auth))
-T('the decision survives a reconnect', /let authPlan = null/.test(SRC) && /authPlan = prompt/.test(SRC) && /if \(mode\) authPlan = mode/.test(auth))
-T('a failed attempt tries the other form', /trying \/register \(the account may be new\)/.test(auth))
-T('success is judged on auth chat, not only "login was successful"', /authSucceeded/.test(auth) && /already logged in/.test(auth))
-T('repeated failure reconnects rather than sitting unauthenticated', /reconnecting for a clean session/.test(auth))
-T('a session that dies mid-auth hands the work to the next session', /the next session picks this up/.test(auth))
+T('the session uses one auth actor', SRC.includes('const authFlow = new AuthFlow(') && SRC.includes('await authFlow.run()'))
+T('registration requires explicit server evidence', FLOW.includes("info.kind==='notreg'") && FLOW.includes("prompt==='register'"))
+T('mode is retained across reconnects', SRC.includes('mode: authPlan') && SRC.includes('authPlan = prompt'))
+T('silence never guesses registration', !SRC.includes('trying /register (the account may be new)') && FLOW.includes('Silence is only silence'))
+T('success recognises multiple server messages', FLOW.includes('authentication successful|already logged in'))
+T('failure pauses instead of forcing auth reconnects', SRC.includes('no automatic login/register loop'))
+T('stale sessions cannot send credentials', SRC.includes('authSessionGen === sessionGen && !ended'))
 
 // --- 2b. what the server says back
 const reply = new Function(SRC.slice(SRC.indexOf('function authReplyInfo'), SRC.indexOf('function loadEnvFile')) + '; return authReplyInfo')()
@@ -85,7 +82,7 @@ T('an ordinary kick is not a ban', ban('Your connection was verified successfull
 T('the bot waits the ban out instead of retrying', /waiting \$\{Math\.round\(waitMs \/ 60000\)\} min/.test(SRC))
 T('the reconnect loop refuses to start a session during a ban', /if \(banUntil && banUntil > Date\.now\(\)\)/.test(SRC))
 T('a ban is caught in chat, in kick, and in the login disconnect', (SRC.match(/banUntil = Date\.now\(\) \+ /g) || []).length >= 3, (SRC.match(/banUntil = Date\.now\(\) \+ /g) || []).length)
-T('a bad password stops the retry loop', /giving up on this password/.test(SRC))
+T('a bad password stops the retry loop', FLOW.includes("['badpass','rule'].includes(info.kind)"))
 
 // --- 2d. the login countdown must not be answered
 T('the pre-auth countdown is classified apart from a real prompt',
@@ -109,8 +106,8 @@ T('WEB=off on a host opens a health port', /else if \(ENV\.PORT\) startHealthPor
 T('the health port serves nothing but health', /not here/.test(SRC) && /healthz/.test(SRC))
 
 // --- 3b. the trigger and its feedback
-T('the server reply to each auth command is logged', /auth: server replied to \$\{cmd\.split\(' '\)\[0\]\}/.test(SRC))
-T('a repeated prompt re-triggers a stuck attempt', /const stuck = authBusy && Date\.now\(\) - authStartedAt > 45000/.test(SRC))
+T('auth commands are logged without secrets', FLOW.includes('credentials/challenge redacted'))
+T('repeated prompts never overlap an auth actor', SRC.includes('const stuck = false') && FLOW.includes('if(this.running)return this.running'))
 T('prompts are rate limited so a silent failure cannot spin', /authCooldownUntil = Date\.now\(\) \+ 8000/.test(SRC))
 T('the build is printed even with WEB=off', /log\(`build \$\{BUILD\}/.test(SRC.slice(SRC.indexOf('async function main'), SRC.indexOf('function startTerminal'))))
 
