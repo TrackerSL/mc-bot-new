@@ -1,0 +1,17 @@
+# the real credentials — never commit this
+.env
+.env.local
+*.env
+!.env.example
+!.env.test
+
+node_modules/
+*.log
+chatraw.jsonl
+capture-*.log
+*.zip
+
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
