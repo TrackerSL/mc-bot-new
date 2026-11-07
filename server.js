@@ -15,7 +15,7 @@ const REMINDERS = !!process.env.SONAR_REMINDERS
 // a 27-block sweep per teleport) in normal play — opt in with SONAR_VERBOSE=1
 const VERBOSE = !!process.env.SONAR_VERBOSE // 20-tick position reminders (capture shows the real client stays silent while idle)
 const DEBUG_CHAT = process.env.DEBUG_CHAT === '1'
-const BUILD = '2026-11-05ao'
+const BUILD = '2026-11-05ap'
 const DEBUG_ITEM = process.env.DEBUG_ITEM === '1'
 const DEBUG_SLOT = process.env.DEBUG_SLOT === '1'
 const ICON_GUESS = process.env.ICON_GUESS === '1'   // off: the 1.20.4 registry is authoritative  // bump when the web UI or item tables change
@@ -213,6 +213,7 @@ const cfg = {
   serverPort: parseInt(ENV.SERVER_PORT || '25565', 10),
   password: ENV.PASSWORD || '',
   auth: /^(on|true|yes|1)$/i.test(ENV.AUTH || 'on'),
+  autoJoin: /^(on|true|yes|1)$/i.test(ENV.AUTO_JOIN || 'on'),
   antiAfk: /^(on|true|yes|1)$/i.test(ENV.ANTI_AFK || 'on'),
   // WEB=off keeps the console completely off (no port bound, no HTTP server)
   web: /^(on|true|yes|1)$/i.test(ENV.WEB || 'on'),
@@ -802,9 +803,14 @@ function closeGate () {
 function openGate () { if (gateOpen) { gateOpen(); gateOpen = null } }
 closeGate()
 
-const queue = { items: [], running: false, sent: 0, size () { return this.items.length } }
+const queue = { items: [], running: false, sent: 0, lifestealInFlight: 0, size () { return this.items.length } }
 queue.push = function (text) {
-  return new Promise((resolve, reject) => {
+  const isLifeJoin = (verifyFor(String(text)) || {}).label === 'lifesteal join'
+  // Auto-join and CMDS can request the same command at the readiness edge.
+  // Keep one in-flight join; its verifier already retries safely until mode 0.
+  if (isLifeJoin && this.lifestealInFlight) return Promise.resolve()
+  if (isLifeJoin) this.lifestealInFlight++
+  const task = new Promise((resolve, reject) => {
     // a session re-push replaces a pending copy of the same command — no
     // duplicate sends, and a stale-gen copy can never shadow the fresh one
     const i = this.items.findIndex(x => x.text === String(text))
@@ -812,6 +818,7 @@ queue.push = function (text) {
     this.items.push({ text: String(text), gen: sessionGen, resolve, reject })
     pump()
   })
+  return isLifeJoin ? task.finally(() => { this.lifestealInFlight = Math.max(0, this.lifestealInFlight - 1) }) : task
 }
 async function pump () {
   if (queue.running) return
@@ -936,6 +943,18 @@ function runSession () {
       prompt: authPromptMode, reply: authReplyInfo, log,
       active: () => authSessionGen === sessionGen && !ended && state === 'play' && !ready,
       send: cmd => SESSION_SEND(cmd)
+    })
+    const { AutoJoinController } = require('./auto_join')
+    const autoJoin = new AutoJoinController(cfg.autoJoin, () => {
+      if (queue.lifestealInFlight) {
+        log('auto-join: Lifesteal join is already queued')
+        return
+      }
+      log('auto-join: hub detected — queueing Lifesteal')
+      queue.push('/queue lifesteal').catch(e => log(`auto-join: queue attempt ended (${e.message})`))
+    })
+    const checkAutoJoin = () => autoJoin.observe({
+      inWorld: player.inWorld, mode: curMode, ready, verified: verifyDone
     })
     const startedAt = Date.now()
 
@@ -1298,11 +1317,14 @@ function runSession () {
       if (!cmdsQueued) {
         cmdsQueued = true
         log(`anti-afk: ${cfg.antiAfk ? 'on — vanilla walk/look/hop actions' : 'off — standing still (no actions)'}`)
+        // Request auto-join before other startup commands so an optional /afk
+        // command cannot run in the hub ahead of the Lifesteal transfer.
+        checkAutoJoin()
         if (cfg.cmds.length) {
           log(`running .env queue: ${cfg.cmds.join(' | ')}`)
           for (const c of cfg.cmds) queue.push(c).catch(() => {})
         }
-      }
+      } else checkAutoJoin()
     }
     const markReady = () => { if (ready) return; ready = true; maybeReady() }
     const setVerifyDone = () => { if (verifyDone) return; verifyDone = true; maybeReady() }
@@ -2513,6 +2535,7 @@ function runSession () {
           // the real game — verify sessions arm it at tp2 (unchanged shape),
           // lobby sessions start it right away
           if (!arena.active) playerStartLoop()
+          checkAutoJoin()
           return
         case 'position': { // synchronize player position
           pos = { x: params.x, y: params.y, z: params.z, yaw: params.yaw, pitch: params.pitch }

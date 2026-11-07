@@ -18,6 +18,7 @@ That's it. It reads the .env file in the same folder and connects.
     SERVER_PORT=25565               server port
     PASSWORD=...                    your server password (used for /register and /login)
     AUTH=on                         on = bot answers the login/register prompts by itself
+    AUTO_JOIN=on                    on = re-join Lifesteal whenever returned to the hub
     ANTI_AFK=on                     on = vanilla walk/look/hop actions; off = stand still
     CMD_DELAY_MS=5000               how long to wait before sending each command (5 seconds)
     WEB=on                          on = web inventory/GUI console; off = no web console at all
@@ -25,7 +26,7 @@ That's it. It reads the .env file in the same folder and connects.
     CMDS=/queue lifesteal,/afk      commands to run automatically after you are in game
     TRANSFER_WAIT_MS=120000         how long to wait for a /queue transfer (2 min; see below)
 
-Change any of these in Notepad, save, restart with npm.cmd start.
+Change any of these in Notepad, save, restart with npm.cmd start. `AUTO_JOIN=on` (the default) waits until login and verification have completed, then sends `/queue lifesteal` when the bot enters the hub (non-survival game mode). It does this once per hub visit, including if the server later returns the bot to the hub. It will not queue while already in Lifesteal. Set `AUTO_JOIN=off` to disable this automatic return-to-Lifesteal behavior. Existing `CMDS` commands are a separate startup queue and still run as configured.
 
 ## Web inventory & GUI console
 
@@ -571,3 +572,9 @@ User confirmed lowercase l in #27. Third-slot-only correction: 36/36 distinct sa
 Added auth_flow.js: session-scoped serialized authentication, challenge priority, server cooldown handling, bounded retries, no registration-on-silence, no overlapping attempts and no automatic auth-failure reconnect loop. Explicit credential errors stop retries. Minimum command spacing 1.5s, respects longer CMD_DELAY_MS and server waits; credentials/tokens redacted. Update the full bundle including auth_flow.js.
 
 454 assertions across 16 offline suites pass, including 25 fake-clock authentication transcript checks. Reader/weights/default submission gates unchanged; all 36 distinct saved labelled maps still pass text plus gates. No live credential test or remote deployment performed. If Fly restarts continue, investigate host events/checks separately; the submitted logs do not establish the restart reason. Ensure Fly internal_port matches WEB_PORT (3000 in the reported deployment). Prior an ZIP retained.
+
+## Automatic hub → Lifesteal return — 2026-11-07ap
+
+Added `AUTO_JOIN=on` (default) to `.env.example`. After authentication and verification, the bot queues `/queue lifesteal` when it joins the CWR hub (observed non-survival game mode). It triggers once per hub visit and re-triggers if the server sends the bot back to the hub after it has been in Lifesteal. Already queued Lifesteal joins are coalesced so the normal `CMDS=/queue lifesteal,/afk` startup list does not double-queue. Set `AUTO_JOIN=off` to disable automatic hub-return behavior; `CMDS` remains an independent configured startup queue.
+
+Validation: 17 auto-join controller tests pass (readiness/verification gates, once-per-visit, return-to-hub, disabled flag, unknown mode), with the full npm test suite and saved CAPTCHA text+policy regression passing. No live test of a forced Lifesteal-to-hub return was performed.
